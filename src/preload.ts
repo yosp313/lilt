@@ -1,3 +1,34 @@
-// oxlint-disable eslint-plugin-unicorn/no-empty-file
-// See the Electron documentation for details on how to use preload scripts:
-// https://www.electronjs.org/docs/latest/tutorial/process-model#preload-scripts
+import { contextBridge, ipcRenderer } from 'electron';
+import type {
+  AiCompleteRequest,
+  Api,
+  Store,
+  TranscribeRequest,
+} from './shared/types.ts';
+
+const api: Api = {
+  load: () => ipcRenderer.invoke('store:load') as Promise<Store>,
+  save: (store: Store) => ipcRenderer.invoke('store:save', store),
+  aiConfig: () => ipcRenderer.invoke('ai:config'),
+  setAiConfig: (config) => ipcRenderer.invoke('ai:set-config', config),
+  complete: (request: AiCompleteRequest) =>
+    ipcRenderer.invoke('ai:complete', request),
+  transcribe: (request: TranscribeRequest) =>
+    ipcRenderer.invoke('ai:transcribe', request),
+  calendarStatus: () => ipcRenderer.invoke('calendar:status'),
+  calendarConnect: (
+    request: import('./shared/types.ts').CalendarConnectRequest,
+  ) => ipcRenderer.invoke('calendar:connect', request),
+  calendarDisconnect: () => ipcRenderer.invoke('calendar:disconnect'),
+  calendarEvents: () => ipcRenderer.invoke('calendar:events'),
+  shareUrl: (token: string) => ipcRenderer.invoke('share:url', token),
+  openShare: (token: string) => ipcRenderer.invoke('share:open', token),
+  onSuspend: (callback: () => void) => {
+    const listener = () => callback();
+    ipcRenderer.on('power:suspend', listener);
+    return () => ipcRenderer.removeListener('power:suspend', listener);
+  },
+  platform: process.platform,
+};
+
+contextBridge.exposeInMainWorld('api', api);
