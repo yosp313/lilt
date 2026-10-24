@@ -45,6 +45,7 @@ const BODIES: Record<string, string> = {
   calendar:
     '<rect x="4" y="5" width="16" height="16" rx="2"/><path d="M8 3v4M16 3v4M4 10h16"/>',
   zap: '<path d="M13 2 4 14h7l-1 8 9-12h-7z"/>',
+  panel: '<rect x="3" y="4" width="18" height="16" rx="2"/><path d="M9 4v16"/>',
 };
 
 export type IconName = keyof typeof BODIES;

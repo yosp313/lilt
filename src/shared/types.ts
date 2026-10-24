@@ -1,13 +1,10 @@
 export type ID = string;
-export type Plan = 'free' | 'business' | 'enterprise';
 export type NoteStatus = 'draft' | 'recording' | 'paused' | 'ended';
 export type SpeakerSource = 'mic' | 'system';
 
 export interface Workspace {
   id: ID;
   name: string;
-  domain: string;
-  plan: Plan;
 }
 
 export interface User {
@@ -18,7 +15,7 @@ export interface User {
 
 export interface Space {
   id: ID;
-  kind: 'personal' | 'team';
+  kind: 'personal' | 'team' | 'custom';
   name: string;
   icon: string;
   description: string;
@@ -128,7 +125,6 @@ export interface Template {
   prompt: string;
   sections: string[];
   builtin: boolean;
-  visibility: 'private' | 'org';
 }
 
 export interface Recipe {
@@ -137,7 +133,6 @@ export interface Recipe {
   prompt: string;
   scope: 'single' | 'multiple';
   model: 'auto' | 'standard' | 'thinking';
-  visibility: 'private' | 'workspace';
 }
 
 export type ScopeType = 'note' | 'folder' | 'space' | 'all' | 'person';
@@ -167,7 +162,6 @@ export interface ChatThread {
 }
 
 export interface Settings {
-  historyDays: number;
   notifications: boolean;
   includeSystemAudio: boolean;
   sttLanguage: string;
@@ -203,9 +197,19 @@ export interface SharedNote {
   hasSummary: boolean;
 }
 
+export type SttSource =
+  | 'cloud'
+  | 'local-server'
+  | 'whisper-small'
+  | 'whisper-large-v3-turbo';
+
 export interface AiConfig {
   configured: boolean;
+  sttSource: SttSource;
+  sttReady: boolean;
+  localModels: { id: SttSource; ready: boolean }[];
   baseUrl: string;
+  sttServerUrl: string;
   chatModel: string;
   thinkingModel: string;
   sttModel: string;
@@ -220,9 +224,16 @@ export interface AiCompleteRequest {
 }
 
 export interface TranscribeRequest {
-  data: ArrayBuffer;
-  mime: string;
+  data?: ArrayBuffer;
+  pcm?: Float32Array;
+  mime?: string;
   language: string;
+  prompt?: string;
+}
+
+export interface SttProgress {
+  file: string;
+  percent: number;
 }
 
 export interface Api {
@@ -231,14 +242,18 @@ export interface Api {
   aiConfig(): Promise<AiConfig>;
   setAiConfig(cfg: {
     baseUrl: string;
+    sttServerUrl: string;
     chatModel: string;
     thinkingModel: string;
     sttModel: string;
     sttLanguage: string;
+    sttSource: SttSource;
     apiKey?: string;
   }): Promise<AiConfig>;
   complete(req: AiCompleteRequest): Promise<{ text: string }>;
   transcribe(req: TranscribeRequest): Promise<{ text: string }>;
+  sttDownload(source: SttSource): Promise<AiConfig>;
+  onSttProgress(cb: (progress: SttProgress) => void): () => void;
   calendarStatus(): Promise<CalendarStatus>;
   calendarConnect(req: CalendarConnectRequest): Promise<CalendarStatus>;
   calendarDisconnect(): Promise<CalendarStatus>;

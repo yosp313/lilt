@@ -130,8 +130,10 @@ kbd {
 }
 
 .rail {
-  flex: 0 0 228px;
-  width: 228px;
+  --rail-w: 228px;
+  position: relative;
+  flex: 0 0 var(--rail-w);
+  width: var(--rail-w);
   display: flex;
   flex-direction: column;
   gap: 11px;
@@ -139,6 +141,82 @@ kbd {
   background: var(--rail);
   color: var(--rail-text);
   min-height: 0;
+  overflow: hidden;
+  transition:
+    flex-basis 0.24s ease,
+    width 0.24s ease,
+    padding 0.24s ease;
+}
+
+.rail-toggle {
+  position: absolute;
+  z-index: 2;
+  top: 19px;
+  right: 12px;
+  display: grid;
+  place-items: center;
+  width: 26px;
+  height: 26px;
+  border-radius: 7px;
+  color: var(--rail-muted);
+  transition:
+    background 0.12s ease,
+    color 0.12s ease;
+}
+
+.rail-toggle:hover {
+  background: var(--rail-2);
+  color: #f4eee2;
+}
+
+/* Collapsed: a 52px icon rail. Labels stay in the DOM for screen readers. */
+.app.rail-closed .rail {
+  flex-basis: 52px;
+  width: 52px;
+  padding-inline: 8px;
+}
+
+.app.rail-closed .rail-search,
+.app.rail-closed .rail-scroll,
+.app.rail-closed .plan-chip,
+.app.rail-closed .user-copy,
+.app.rail-closed .new-note-btn kbd,
+.app.rail-closed .nav-count {
+  display: none;
+}
+
+/* Keeps the brand's row height so the toggle has the top slot to itself. */
+.app.rail-closed .brand {
+  display: none;
+}
+
+/* In flow when collapsed, so it can never sit on top of New note. */
+.app.rail-closed .rail-toggle {
+  position: static;
+  margin: 0 auto;
+}
+
+.app.rail-closed .rail-nav {
+  flex: 1;
+}
+
+.app.rail-closed .new-note-btn,
+.app.rail-closed .rail-nav-item,
+.app.rail-closed .rail-link,
+.app.rail-closed .user-row {
+  justify-content: center;
+  padding-inline: 0;
+}
+
+.app.rail-closed .new-note-btn > span,
+.app.rail-closed .rail-nav-item > span,
+.app.rail-closed .rail-link > span {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  overflow: hidden;
+  clip-path: inset(50%);
+  white-space: nowrap;
 }
 
 .brand {
@@ -312,8 +390,14 @@ kbd {
   margin-top: 1px;
 }
 
+.folder-line {
+  display: flex;
+  align-items: center;
+  gap: 2px;
+}
+
 .folder-row {
-  width: 100%;
+  flex: 1;
   display: flex;
   align-items: center;
   gap: 7px;
@@ -322,6 +406,23 @@ kbd {
   font-size: 12px;
   color: #b3aa9c;
   min-width: 0;
+}
+
+.folder-line .folder-delete {
+  width: 22px;
+  height: 22px;
+  opacity: 0;
+  color: #8f8377;
+}
+
+.folder-line:hover .folder-delete,
+.folder-line .folder-delete:focus-visible {
+  opacity: 1;
+}
+
+.folder-line .folder-delete:hover {
+  background: rgba(255, 255, 255, 0.06);
+  color: #e2b5a6;
 }
 
 .folder-row span {
@@ -391,6 +492,10 @@ kbd {
   padding: 5px 4px;
   font-size: 11.5px;
   color: #a49b8d;
+}
+
+.rail-add {
+  margin-top: 16px;
 }
 
 .rail-link:hover {
@@ -699,25 +804,6 @@ kbd {
   line-height: 1.5;
 }
 
-.history-hint {
-  display: flex;
-  gap: 7px;
-  align-items: flex-start;
-  margin: 7px 12px 13px;
-  padding: 9px 10px;
-  border: 1px dashed var(--line-strong);
-  border-radius: 8px;
-  color: var(--muted);
-  font-size: 10.5px;
-  line-height: 1.45;
-  text-align: left;
-}
-
-.history-hint:hover {
-  border-color: var(--sage);
-  color: var(--ink-soft);
-}
-
 /* ------------------------------------------------------------------- main */
 
 .main {
@@ -927,30 +1013,6 @@ kbd {
   line-height: 1.6;
 }
 
-.notice-card {
-  width: 100%;
-  display: flex;
-  align-items: center;
-  gap: 10px;
-  padding: 12px 15px;
-  margin-bottom: 20px;
-  border-radius: 11px;
-  border: 1px solid #dfe5d6;
-  background: var(--sage-mist);
-  color: var(--ink-soft);
-  font-size: 11.5px;
-  line-height: 1.5;
-}
-
-.notice-card strong {
-  color: var(--inksoft, var(--ink));
-}
-
-.notice-card > svg:last-child {
-  margin-left: auto;
-  color: var(--sage);
-}
-
 /* ------------------------------------------------------------------- home */
 
 .home {
@@ -1024,13 +1086,6 @@ kbd {
 .stat-card.accent {
   background: var(--sage-mist);
   border-color: #d9e2d0;
-}
-
-.stat-arrow {
-  position: absolute;
-  right: 12px;
-  top: 12px;
-  color: var(--sage);
 }
 
 .home-section {
@@ -2487,48 +2542,6 @@ kbd {
   line-height: 1.45;
 }
 
-.plan-grid {
-  display: grid;
-  grid-template-columns: repeat(3, 1fr);
-  gap: 8px;
-  margin: 8px 0 14px;
-}
-
-.plan-option {
-  display: flex;
-  flex-direction: column;
-  gap: 3px;
-  padding: 10px 11px;
-  border: 1px solid var(--line);
-  border-radius: 10px;
-  cursor: pointer;
-  background: #fcfaf5;
-}
-
-.plan-option:hover {
-  border-color: var(--line-strong);
-}
-
-.plan-option.active,
-.plan-option:has(input:checked) {
-  border-color: var(--sage);
-  background: var(--sage-mist);
-}
-
-.plan-option input {
-  display: none;
-}
-
-.plan-option strong {
-  font-size: 11.5px;
-}
-
-.plan-option span {
-  font-size: 9.5px;
-  color: var(--muted);
-  line-height: 1.45;
-}
-
 .settings-save {
   display: flex;
   align-items: center;
@@ -3029,6 +3042,10 @@ kbd {
   border-top: 1px solid var(--line);
 }
 
+.modal-foot .push-left {
+  margin-right: auto;
+}
+
 .modal.confirm .modal-foot {
   margin-top: 18px;
 }
@@ -3211,8 +3228,7 @@ kbd {
 
 @media (max-width: 1240px) {
   .rail {
-    flex-basis: 208px;
-    width: 208px;
+    --rail-w: 208px;
   }
   .listpane {
     flex-basis: 286px;
@@ -3256,8 +3272,7 @@ kbd {
 
 @media (max-width: 900px) {
   .rail {
-    flex-basis: 190px;
-    width: 190px;
+    --rail-w: 190px;
   }
   .listpane {
     flex-basis: 260px;
@@ -3267,9 +3282,6 @@ kbd {
     padding: 30px 24px 56px;
   }
   .field-grid.three {
-    grid-template-columns: 1fr;
-  }
-  .plan-grid {
     grid-template-columns: 1fr;
   }
 }

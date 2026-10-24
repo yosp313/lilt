@@ -10,6 +10,8 @@ import { FuseV1Options, FuseVersion } from '@electron/fuses';
 const config: ForgeConfig = {
   packagerConfig: {
     asar: true,
+    // whisper.cpp binary; built by `npm run build:whisper`.
+    extraResource: ['./vendor/whisper'],
   },
   rebuildConfig: {},
   makers: [

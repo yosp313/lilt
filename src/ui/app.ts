@@ -8,42 +8,48 @@ import type {
   Folder,
   ID,
   Note,
-  Plan,
   Recipe,
   Scope,
   Section,
   Segment,
   Space,
   Store,
+  SttSource,
   Template,
 } from '../shared/types.ts';
 import {
+  buildAttendeeMessages,
   buildChatMessages,
   buildEnhanceMessages,
   calendarEventKey,
   dueReminder,
+  encodeWav,
   enhancedText,
+  folderDescendants,
   folderPath,
   formatClock,
   formatDuration,
-  hiddenByHistory,
+  LOCAL_STT_MODELS,
   localAnswer,
   localEnhance,
   mergeSegment,
   modelLabel,
   noteSummary,
+  parseAttendees,
   parseEnhancedResponse,
   relativeDate,
   retrieve,
   searchNotes,
   segmentFromChunk,
   toCsv,
+  trimPcm,
   truncate,
+  type SpeechWindow,
   upcomingEvents,
   visibleNotes,
 } from '../shared/logic.ts';
 import { createSeed } from '../shared/seed.ts';
-import { Capture } from '../capture.ts';
+import { Capture, LOCAL_CHUNK_MS } from '../capture.ts';
 import { html, Html, mount, raw } from './html.ts';
 import { brandMark, icon, type IconName } from './icons.ts';
 
@@ -74,10 +80,13 @@ type ConfirmAction =
   | 'reset-demo'
   | 'delete-all'
   | 'delete-template'
-  | 'delete-recipe';
+  | 'delete-recipe'
+  | 'delete-space'
+  | 'delete-folder';
 
 type Modal =
   | { type: 'folder'; spaceId: ID; parentId: ID | null }
+  | { type: 'space'; spaceId?: ID }
   | { type: 'template' }
   | { type: 'recipe' }
   | { type: 'move' }
@@ -118,9 +127,11 @@ interface UI {
   generatingNoteId: ID | null;
   sttError: string;
   sttWarned: boolean;
+  sttDownload: { file: string; percent: number } | null;
   focusTitle: boolean;
   focusChat: boolean;
   transcriptHidden: boolean;
+  railClosed: boolean;
 }
 
 const root = document.getElementById('app');
@@ -138,6 +149,7 @@ interface ChunkJob {
   blob: Blob;
   startMs: number;
   endMs: number;
+  speech: SpeechWindow;
 }
 
 const busySources = new Set<'mic' | 'system'>();
@@ -168,7 +180,6 @@ const templateById = (id: ID | null) =>
   id ? (ui.db.templates.find((template) => template.id === id) ?? null) : null;
 const currentNote = () =>
   ui.view.name === 'note' ? noteById(ui.view.noteId) : null;
-const isFree = () => ui.db.workspace.plan === 'free';
 
 function toast(message: string): void {
   ui.toast = message;
@@ -247,7 +258,7 @@ function startChat(scope: Scope = scopeForView()): void {
     .filter((thread) => sameScope(thread.scope, scope))
     .sort((a, b) => b.createdAt.localeCompare(a.createdAt))[0];
   ui.threadId = existing?.id ?? null;
-  ui.chatModel = existing?.model ?? (isFree() ? 'auto' : ui.chatModel);
+  ui.chatModel = existing?.model ?? ui.chatModel;
   ui.chatOpen = true;
   ui.focusChat = true;
   ui.chatMenu = false;
@@ -260,7 +271,7 @@ function newThread(): void {
     id: uid(),
     scope,
     title: 'New conversation',
-    model: isFree() ? 'auto' : ui.chatModel,
+    model: ui.chatModel,
     createdAt: nowIso(),
     messages: [],
   };
@@ -329,7 +340,7 @@ async function sendChat(): Promise<void> {
           history,
           scope.type === 'note',
         ),
-        model: isFree() ? 'auto' : thread.model,
+        model: thread.model,
       });
       answer = response.text.trim();
       model =
@@ -365,26 +376,30 @@ async function sendChat(): Promise<void> {
 // ---------------------------------------------------------------------------
 
 function createCapture(): Capture {
-  return new Capture({
-    onLevel: updateMeters,
-    onChunk: (source, blob, start, end) => {
-      if (!recordingNoteId) return;
-      queueChunk({
-        noteId: recordingNoteId,
-        baseMs: recordingBaseMs,
-        source,
-        blob,
-        startMs: start,
-        endMs: end,
-      });
+  return new Capture(
+    {
+      onLevel: updateMeters,
+      onChunk: (source, blob, start, end, speech) => {
+        if (!recordingNoteId) return;
+        queueChunk({
+          noteId: recordingNoteId,
+          baseMs: recordingBaseMs,
+          source,
+          blob,
+          startMs: start,
+          endMs: end,
+          speech,
+        });
+      },
+      onState: handleCaptureState,
+      onNotice: (message) => toast(message),
+      onAutoStop: (reason) => {
+        toast(`Recording stopped automatically: ${reason}.`);
+        void stopRecording();
+      },
     },
-    onState: handleCaptureState,
-    onNotice: (message) => toast(message),
-    onAutoStop: (reason) => {
-      toast(`Recording stopped automatically: ${reason}.`);
-      void stopRecording();
-    },
-  });
+    () => (ui.ai.sttSource === 'cloud' ? 7000 : LOCAL_CHUNK_MS),
+  );
 }
 
 function updateMeters(me: number, them: number): void {
@@ -431,9 +446,38 @@ function finalizeRecording(): void {
 async function completeMeeting(note: Note): Promise<void> {
   await waitForTranscriptions();
   const fresh = noteById(note.id);
-  if (!fresh || !ui.db.settings.autoEnhance || fresh.enhanced) return;
+  if (!fresh) return;
   if (!fresh.rawNotes.trim() && fresh.transcript.length === 0) return;
+  if (!ui.db.settings.autoEnhance || fresh.enhanced) {
+    await detectAttendees(fresh);
+    return;
+  }
   await enhanceNote(fresh.id);
+}
+
+/** Fill the attendee list from the transcript when nothing else supplied it. */
+async function detectAttendees(note: Note): Promise<void> {
+  if (!ui.ai.configured || note.attendees.length > 0) return;
+  if (note.transcript.length === 0) return;
+  try {
+    const { text } = await window.api.complete({
+      messages: buildAttendeeMessages(note),
+      model: 'auto',
+      json: true,
+    });
+    const names = parseAttendees(text);
+    const fresh = noteById(note.id);
+    if (!fresh || fresh.attendees.length > 0 || names.length === 0) return;
+    fresh.attendees = names;
+    touch(fresh);
+    persist();
+    if (ui.view.name === 'note' && ui.view.noteId === fresh.id) renderMain();
+    toast(
+      `${names.length} ${names.length === 1 ? 'person' : 'people'} found in the transcript.`,
+    );
+  } catch (error) {
+    console.error(error);
+  }
 }
 
 async function waitForTranscriptions(limitMs = 20_000): Promise<void> {
@@ -486,13 +530,13 @@ async function stopRecording(): Promise<void> {
 }
 
 function queueChunk(job: ChunkJob): void {
-  if (!ui.ai.configured) {
+  if (!ui.ai.sttReady) {
     if (!ui.sttWarned) {
       ui.sttWarned = true;
       ui.sttError =
-        'Transcription needs a speech-to-text provider. Audio is not saved. Add one in Settings → Intelligence.';
+        'Transcription needs a speech-to-text model. Pick a cloud provider or download Whisper in Settings → Intelligence. Audio is not saved.';
       toast(
-        'No transcription provider configured — your notes are still being saved.',
+        'No speech-to-text model ready — your notes are still being saved.',
       );
       if (ui.view.name === 'note') renderMain();
     }
@@ -513,20 +557,28 @@ function queueChunk(job: ChunkJob): void {
 async function runChunk(job: ChunkJob): Promise<void> {
   busySources.add(job.source);
   try {
-    const data = await job.blob.arrayBuffer();
-    const { text } = await window.api.transcribe({
-      data,
-      mime: job.blob.type || 'audio/webm',
-      language: ui.db.settings.sttLanguage,
-    });
+    const local = ui.ai.sttSource !== 'cloud';
+    const prompt = sttPrompt(noteById(job.noteId));
+    const pcm = trimPcm(await blobToPcm(job.blob), job.speech);
+    const { text } = await window.api.transcribe(
+      local
+        ? { pcm, language: ui.db.settings.sttLanguage, prompt }
+        : {
+            // Silence was already cut, so WAV is the honest container to send.
+            data: encodeWav(pcm).buffer,
+            mime: 'audio/wav',
+            language: ui.db.settings.sttLanguage,
+            prompt,
+          },
+    );
     const note = noteById(job.noteId);
     if (!note || !text.trim()) return;
     addTranscriptSegment(
       note,
       job.source,
       text.trim(),
-      job.startMs,
-      job.endMs,
+      job.startMs + job.speech.startMs,
+      job.startMs + job.speech.endMs,
       job.baseMs,
     );
   } catch (error) {
@@ -546,6 +598,41 @@ async function runChunk(job: ChunkJob): Promise<void> {
       queuedChunks.delete(job.source);
       void runChunk(next);
     }
+  }
+}
+
+/** Meeting words prime Whisper's decoder so names and terms come out right. */
+function sttPrompt(note: Note | null): string | undefined {
+  if (!note) return undefined;
+  const title = note.title.trim();
+  const parts = /^(new note|untitled)/i.test(title)
+    ? []
+    : [`Meeting: ${title}.`];
+  const people = note.attendees
+    .map((person) => person.trim())
+    .filter(Boolean)
+    .slice(0, 12);
+  if (people.length > 0) parts.push(`Participants: ${people.join(', ')}.`);
+  return parts.join(' ').slice(0, 300) || undefined;
+}
+
+/** Chromium decodes the recorder's webm/opus; Whisper wants 16 kHz mono PCM. */
+async function blobToPcm(blob: Blob): Promise<Float32Array> {
+  const context = new AudioContext();
+  try {
+    const decoded = await context.decodeAudioData(await blob.arrayBuffer());
+    const offline = new OfflineAudioContext(
+      1,
+      Math.max(1, Math.ceil(decoded.duration * 16000)),
+      16000,
+    );
+    const source = offline.createBufferSource();
+    source.buffer = decoded;
+    source.connect(offline.destination);
+    source.start();
+    return (await offline.startRendering()).getChannelData(0);
+  } finally {
+    void context.close();
   }
 }
 
@@ -689,11 +776,21 @@ function renderReminder(): void {
 function reminderView(): Html {
   if (!reminder) return html``;
   return html`<div class="reminder-card" role="status" aria-live="polite">
-    <div class="reminder-head">${icon('calendar', 13)} <span>Meeting in a minute</span></div>
+    <div class="reminder-head">
+      ${icon('calendar', 13)} <span>Meeting in a minute</span>
+    </div>
     <strong class="reminder-title">${reminder.title}</strong>
-    <span class="reminder-meta">${eventTime(reminder)}${reminder.attendees.length ? ` · ${reminder.attendees.length} people` : ''}</span>
+    <span class="reminder-meta"
+      >${eventTime(reminder)}${reminder.attendees.length ? ` · ${reminder.attendees.length} people` : ''}</span
+    >
     <div class="reminder-actions">
-      <button class="primary-btn small" data-act="start-event" data-key="${calendarEventKey(reminder)}">${icon('mic', 12)} Join & take notes</button>
+      <button
+        class="primary-btn small"
+        data-act="start-event"
+        data-key="${calendarEventKey(reminder)}"
+      >
+        ${icon('mic', 12)} Join & take notes
+      </button>
       <button class="text-btn" data-act="dismiss-reminder">Dismiss</button>
     </div>
   </div>`;
@@ -785,7 +882,9 @@ function eventRow(event: CalendarEvent): Html {
   return html`<div class="event-row">
     <div class="event-time">
       <strong>${eventTime(event)}</strong>
-      <span>${formatDuration(Date.parse(event.end) - Date.parse(event.start))}</span>
+      <span
+        >${formatDuration(Date.parse(event.end) - Date.parse(event.start))}</span
+      >
     </div>
     <div class="event-body">
       <strong>${event.title}</strong>
@@ -797,7 +896,13 @@ function eventRow(event: CalendarEvent): Html {
     </div>
     <div class="event-actions">
       ${note ? html`<button class="text-btn" data-act="open-note" data-id="${note.id}">Open note</button>` : ''}
-      <button class="primary-btn small" data-act="start-event" data-key="${calendarEventKey(event)}">${icon('mic', 12)} Take notes</button>
+      <button
+        class="primary-btn small"
+        data-act="start-event"
+        data-key="${calendarEventKey(event)}"
+      >
+        ${icon('mic', 12)} Take notes
+      </button>
       ${event.meetingUrl ? html`<button class="ghost-btn small" data-act="join-link" data-key="${calendarEventKey(event)}">${icon('external', 12)} Join</button>` : ''}
     </div>
   </div>`;
@@ -815,40 +920,58 @@ function calendarView(): Html {
     <header class="page-head">
       <div class="eyebrow">Next 14 days</div>
       <h1>Calendar</h1>
-      <p class="lede">Read-only. Connect Google Calendar or Outlook once, and every meeting can become a note without a bot joining.</p>
+      <p class="lede">
+        Read-only. Connect Google Calendar or Outlook once, and every meeting
+        can become a note without a bot joining.
+      </p>
       ${
         status.connected
           ? html`<div class="page-actions">
-            <button class="ghost-btn" data-act="calendar-sync">${icon('refresh', 13)} ${ui.calendar.syncing ? 'Syncing…' : 'Sync now'}</button>
-          </div>`
+              <button class="ghost-btn" data-act="calendar-sync">
+                ${icon('refresh', 13)}
+                ${ui.calendar.syncing ? 'Syncing…' : 'Sync now'}
+              </button>
+            </div>`
           : html`<div class="page-actions">
-            <button class="primary-btn" data-act="nav" data-view="settings">${icon('calendar', 13)} Connect a calendar</button>
-          </div>`
+              <button class="primary-btn" data-act="nav" data-view="settings">
+                ${icon('calendar', 13)} Connect a calendar
+              </button>
+            </div>`
       }
     </header>
     ${status.error ? html`<p class="calendar-error">${status.error}</p>` : ''}
     ${
       !status.connected
         ? html`<div class="blank-state">
-          ${icon('calendar', 26)}
-          <h2>No calendar connected.</h2>
-          <p>Settings → Calendar takes an OAuth client ID from your own Google or Microsoft app. Tokens stay in your OS keychain; Lilt only reads the next two weeks.</p>
-          <button class="primary-btn" data-act="nav" data-view="settings">Open settings</button>
-        </div>`
+            ${icon('calendar', 26)}
+            <h2>No calendar connected.</h2>
+            <p>
+              Settings → Calendar takes an OAuth client ID from your own Google
+              or Microsoft app. Tokens stay in your OS keychain; Lilt only reads
+              the next two weeks.
+            </p>
+            <button class="primary-btn" data-act="nav" data-view="settings">
+              Open settings
+            </button>
+          </div>`
         : events.length === 0
           ? html`<div class="blank-state">
-            ${icon('calendar', 26)}
-            <h2>Nothing on the calendar.</h2>
-            <p>No meetings in the next two weeks, or the account has no events shared with this app.</p>
-          </div>`
+              ${icon('calendar', 26)}
+              <h2>Nothing on the calendar.</h2>
+              <p>
+                No meetings in the next two weeks, or the account has no events
+                shared with this app.
+              </p>
+            </div>`
           : html`<div class="calendar-list">
-            ${[...groups].map(
-              ([day, list]) => html`<section class="calendar-day">
-                <h2>${day}</h2>
-                ${list.map((event) => eventRow(event))}
-              </section>`,
-            )}
-          </div>`
+              ${[...groups].map(
+                ([day, list]) =>
+                  html`<section class="calendar-day">
+                    <h2>${day}</h2>
+                    ${list.map((event) => eventRow(event))}
+                  </section>`,
+              )}
+            </div>`
     }
   </div>`;
 }
@@ -916,6 +1039,7 @@ async function enhanceNote(
 
   let enhanced;
   let fellBack = false;
+  let rawText = '';
   if (ui.ai.configured) {
     try {
       const { text } = await window.api.complete({
@@ -923,6 +1047,7 @@ async function enhanceNote(
         model: 'auto',
         json: true,
       });
+      rawText = text;
       enhanced = parseEnhancedResponse(
         text,
         note,
@@ -944,6 +1069,13 @@ async function enhanceNote(
   if (!fresh) {
     renderMain();
     return;
+  }
+  const detected = rawText ? parseAttendees(rawText) : [];
+  if (fresh.attendees.length === 0 && detected.length > 0) {
+    fresh.attendees = detected;
+    toast(
+      `${detected.length} ${detected.length === 1 ? 'person' : 'people'} found in the transcript.`,
+    );
   }
   fresh.enhanced = enhanced;
   fresh.templateId = template?.id ?? null;
@@ -1069,6 +1201,92 @@ function applyMove(folderIds: string[]): void {
   );
 }
 
+function saveSpace(form: HTMLFormElement): void {
+  if (ui.modal?.type !== 'space') return;
+  const data = new FormData(form);
+  const name = String(data.get('name') ?? '').trim();
+  if (!name) {
+    toast('Give the space a name.');
+    return;
+  }
+  const description = String(data.get('description') ?? '').trim();
+  const existing = ui.modal.spaceId ? spaceById(ui.modal.spaceId) : null;
+  ui.modal = null;
+  if (existing) {
+    existing.name = name;
+    existing.description = description;
+    persist();
+    renderAll();
+    toast('Space updated.');
+    return;
+  }
+  const space: Space = {
+    id: uid(),
+    kind: 'custom',
+    name,
+    description,
+    icon: 'briefcase',
+  };
+  ui.db.spaces.push(space);
+  persist();
+  ui.view = { name: 'space', spaceId: space.id };
+  renderAll();
+  toast('Space created.');
+}
+
+function deleteFolder(id: ID): void {
+  const folder = folderById(id);
+  if (!folder) return;
+  const ids = folderDescendants(ui.db.folders, id);
+  for (const note of ui.db.notes) {
+    if (!note.folderIds.some((entry) => ids.has(entry))) continue;
+    note.folderIds = note.folderIds.filter((entry) => !ids.has(entry));
+    touch(note);
+  }
+  ui.db.folders = ui.db.folders.filter((entry) => !ids.has(entry.id));
+  if (ui.view.name === 'folder' && ids.has(ui.view.folderId)) {
+    const parent = folder.parentId ? folderById(folder.parentId) : null;
+    ui.view = parent
+      ? { name: 'folder', folderId: parent.id }
+      : { name: 'space', spaceId: folder.spaceId };
+  }
+  persist();
+  renderAll();
+  toast('Folder deleted.');
+}
+
+function deleteSpace(id: ID): void {
+  const space = spaceById(id);
+  if (!space || space.kind === 'personal') return;
+  const fallback = ui.db.spaces.find((entry) => entry.kind === 'personal');
+  const folders = new Set(
+    ui.db.folders
+      .filter((folder) => folder.spaceId === id)
+      .map((folder) => folder.id),
+  );
+  for (const note of ui.db.notes) {
+    const moved = note.spaceId === id;
+    if (moved && fallback) note.spaceId = fallback.id;
+    const stripped = note.folderIds.some((folderId) => folders.has(folderId));
+    if (stripped)
+      note.folderIds = note.folderIds.filter(
+        (folderId) => !folders.has(folderId),
+      );
+    if (moved || stripped) touch(note);
+  }
+  ui.db.folders = ui.db.folders.filter((folder) => folder.spaceId !== id);
+  ui.db.spaces = ui.db.spaces.filter((entry) => entry.id !== id);
+  if (
+    (ui.view.name === 'space' && ui.view.spaceId === id) ||
+    (ui.view.name === 'folder' && folders.has(ui.view.folderId))
+  ) {
+    ui.view = { name: 'notes' };
+  }
+  persist();
+  renderAll();
+  toast('Space deleted.');
+}
+
 function createFolder(form: HTMLFormElement): void {
   if (ui.modal?.type !== 'folder') return;
   const data = new FormData(form);
@@ -1077,10 +1295,14 @@ function createFolder(form: HTMLFormElement): void {
     toast('Give the folder a name.');
     return;
   }
+  const parentField = data.get('parentId');
   const folder: Folder = {
     id: uid(),
     spaceId: ui.modal.spaceId,
-    parentId: String(data.get('parentId') ?? '') || ui.modal.parentId,
+    parentId:
+      parentField === null
+        ? ui.modal.parentId
+        : String(parentField).trim() || null,
     name,
     icon: 'folder',
     description: String(data.get('description') ?? '').trim(),
@@ -1111,8 +1333,6 @@ function saveTemplate(form: HTMLFormElement): void {
     prompt,
     sections,
     builtin: false,
-    visibility:
-      String(data.get('visibility') ?? 'private') === 'org' ? 'org' : 'private',
   };
   ui.db.templates.push(template);
   ui.modal = null;
@@ -1138,10 +1358,6 @@ function saveRecipe(form: HTMLFormElement): void {
         ? 'multiple'
         : 'single',
     model: String(data.get('model') ?? 'auto') as Recipe['model'],
-    visibility:
-      String(data.get('visibility') ?? 'private') === 'workspace'
-        ? 'workspace'
-        : 'private',
   };
   ui.db.recipes.push(recipe);
   ui.modal = null;
@@ -1167,11 +1383,6 @@ function runRecipe(recipe: Recipe): void {
 
 async function saveSettings(form: HTMLFormElement): Promise<void> {
   const data = new FormData(form);
-  const historyDays = Number(data.get('historyDays'));
-  ui.db.workspace.plan = String(data.get('plan') ?? 'free') as Plan;
-  ui.db.settings.historyDays = Number.isFinite(historyDays)
-    ? Math.max(1, Math.min(3650, Math.round(historyDays)))
-    : 30;
   ui.db.settings.includeSystemAudio = data.get('includeSystemAudio') === 'on';
   ui.db.settings.autoEnhance = data.get('autoEnhance') === 'on';
   ui.db.settings.notifications = data.get('notifications') === 'on';
@@ -1183,10 +1394,12 @@ async function saveSettings(form: HTMLFormElement): Promise<void> {
     const apiKey = String(data.get('apiKey') ?? '').trim();
     ui.ai = await window.api.setAiConfig({
       baseUrl: String(data.get('baseUrl') ?? ''),
+      sttServerUrl: String(data.get('sttServerUrl') ?? ''),
       chatModel: String(data.get('chatModel') ?? ''),
       thinkingModel: String(data.get('thinkingModel') ?? ''),
       sttModel: String(data.get('sttModel') ?? ''),
       sttLanguage: ui.db.settings.sttLanguage,
+      sttSource: String(data.get('sttSource') ?? ui.ai.sttSource) as SttSource,
       ...(apiKey ? { apiKey } : {}),
     });
     toast('Settings saved.');
@@ -1208,23 +1421,50 @@ function noteView(note: Note): Html {
   return html`<div class="note-page">
     <header class="note-top">
       <div class="crumbs">
-        <button data-act="nav" data-view="space" data-id="${note.spaceId}">${space?.name ?? 'Notes'}</button>
+        <button data-act="nav" data-view="space" data-id="${note.spaceId}">
+          ${space?.name ?? 'Notes'}
+        </button>
         ${
           folder
-            ? html`<span>/</span><button data-act="nav" data-view="folder" data-id="${folder.id}">${folder.name}</button>`
+            ? html`<span>/</span
+                ><button
+                  data-act="nav"
+                  data-view="folder"
+                  data-id="${folder.id}"
+                >
+                  ${folderPath(ui.db.folders, folder.id)}
+                </button>`
             : ''
         }
       </div>
       <div class="note-actions">
         ${
           note.status === 'ended'
-            ? html`<button class="ghost-btn small" data-act="start-recording" data-id="${note.id}">${icon('mic', 13)} Resume</button>`
+            ? html`<button
+                class="ghost-btn small"
+                data-act="start-recording"
+                data-id="${note.id}"
+              >
+                ${icon('mic', 13)} Resume
+              </button>`
             : ''
         }
-        <button class="ghost-btn small" data-act="share-open-modal" data-id="${note.id}">
-          ${icon('share', 13)} ${note.share.mode === 'off' ? 'Share' : 'Preview'}
+        <button
+          class="ghost-btn small"
+          data-act="share-open-modal"
+          data-id="${note.id}"
+        >
+          ${icon('share', 13)}
+          ${note.share.mode === 'off' ? 'Share' : 'Preview'}
         </button>
-        <button class="tiny-btn danger" data-act="delete-note" data-id="${note.id}" title="Move to trash">${icon('trash', 14)}</button>
+        <button
+          class="tiny-btn danger"
+          data-act="delete-note"
+          data-id="${note.id}"
+          title="Move to trash"
+        >
+          ${icon('trash', 14)}
+        </button>
       </div>
     </header>
     <div class="note-scroll">
@@ -1239,7 +1479,9 @@ function noteView(note: Note): Html {
           spellcheck="false"
         />
         <div class="note-meta">
-          <span>${new Date(note.createdAt).toLocaleDateString('en', { month: 'short', day: 'numeric' })}</span>
+          <span
+            >${new Date(note.createdAt).toLocaleDateString('en', { month: 'short', day: 'numeric' })}</span
+          >
           ${note.durationMs > 0 ? html`<span class="dot-sep">·</span><span>${formatDuration(note.durationMs)}</span>` : ''}
           ${note.share.mode !== 'off' ? html`<span class="shared-chip">${icon('globe', 11)} Local preview</span>` : ''}
           ${note.enhanced ? html`<span class="generated-chip">${icon('sparkle', 11)} ${templateById(note.enhanced.templateId)?.name ?? 'Enhanced'}</span>` : ''}
@@ -1249,7 +1491,7 @@ function noteView(note: Note): Html {
           value="${note.attendees.join(', ')}"
           data-change="attendees"
           data-id="${note.id}"
-          placeholder="Add attendees, separated by commas"
+          placeholder="People in the meeting — filled from the transcript automatically"
           aria-label="Attendees"
         />
       </div>
@@ -1262,7 +1504,9 @@ function recorderBar(note: Note): Html {
   const paused = note.status === 'paused';
   return html`<div class="recorder-bar">
     <span class="rec-dot ${paused ? 'paused' : ''}"></span>
-    <span class="rec-timer" id="rec-timer">${formatClock(recordingBaseMs + capture.elapsedMs)}</span>
+    <span class="rec-timer" id="rec-timer"
+      >${formatClock(recordingBaseMs + capture.elapsedMs)}</span
+    >
     <span class="rec-state">${paused ? 'Paused' : 'Recording'}</span>
     <div class="levels">
       <span class="level-label">Me</span>
@@ -1271,7 +1515,11 @@ function recorderBar(note: Note): Html {
       <span class="level-track"><i id="meter-them"></i></span>
     </div>
     <div class="spacer"></div>
-    <button class="round-btn" data-act="${paused ? 'resume-recording' : 'pause-recording'}" title="${paused ? 'Resume' : 'Pause'}">
+    <button
+      class="round-btn"
+      data-act="${paused ? 'resume-recording' : 'pause-recording'}"
+      title="${paused ? 'Resume' : 'Pause'}"
+    >
       ${icon(paused ? 'play' : 'pause', 13)}
     </button>
     <button class="stop-btn" data-act="stop-recording" data-id="${note.id}">
@@ -1284,20 +1532,34 @@ function startCard(note: Note): Html {
   const fresh = note.status === 'draft';
   return html`<div class="start-card ${fresh ? '' : 'compact'}">
     <div class="start-copy">
-      <div class="eyebrow">${fresh ? 'Manual start only' : 'Recording ended'}</div>
-      <h2>${fresh ? 'Capture this meeting' : note.durationMs > 0 ? `${formatDuration(note.durationMs)} remembered` : 'Ready to continue'}</h2>
-      <p>${
-        fresh
-          ? 'No bot joins the call. Lilt listens to your microphone and system audio, transcribes in short chunks, and discards the audio immediately.'
-          : 'Resume to add more audio, then regenerate the notes so the new part is included.'
-      }</p>
+      <div class="eyebrow">
+        ${fresh ? 'Manual start only' : 'Recording ended'}
+      </div>
+      <h2>
+        ${fresh ? 'Capture this meeting' : note.durationMs > 0 ? `${formatDuration(note.durationMs)} remembered` : 'Ready to continue'}
+      </h2>
+      <p>
+        ${
+          fresh
+            ? 'No bot joins the call. Lilt listens to your microphone and system audio, transcribes in short chunks, and discards the audio immediately.'
+            : 'Resume to add more audio, then regenerate the notes so the new part is included.'
+        }
+      </p>
     </div>
     <div class="start-actions">
       <label class="switch-row">
-        <input type="checkbox" data-change="include-system" ${ui.db.settings.includeSystemAudio ? raw('checked') : ''} />
+        <input
+          type="checkbox"
+          data-change="include-system"
+          ${ui.db.settings.includeSystemAudio ? raw('checked') : ''}
+        />
         <span>System audio</span>
       </label>
-      <button class="record-btn" data-act="start-recording" data-id="${note.id}">
+      <button
+        class="record-btn"
+        data-act="start-recording"
+        data-id="${note.id}"
+      >
         ${icon('mic', 14)} ${fresh ? 'Start notes' : 'Resume recording'}
       </button>
     </div>
@@ -1317,30 +1579,53 @@ function liveBody(note: Note): Html {
         data-id="${note.id}"
         placeholder="Type rough notes — names, numbers, what you heard. Lilt will shape them afterwards."
         spellcheck="false"
-      >${note.rawNotes}</textarea>
+      >
+${note.rawNotes}</textarea>
     </div>
     <div class="panel live-transcript">
       <div class="panel-head">
-        <span>Transcript <span class="inline-count" id="transcript-count">${note.transcript.length}</span></span>
+        <span
+          >Transcript
+          <span class="inline-count" id="transcript-count"
+            >${note.transcript.length}</span
+          ></span
+        >
         <div class="panel-actions">
-          <button class="tiny-btn" data-act="copy-transcript" title="Copy transcript">${icon('copy', 12)}</button>
-          <button class="tiny-btn" data-act="toggle-transcript" title="${ui.transcriptHidden ? 'Show' : 'Hide'} transcript">${icon('eye', 12)}</button>
+          <button
+            class="tiny-btn"
+            data-act="copy-transcript"
+            title="Copy transcript"
+          >
+            ${icon('copy', 12)}
+          </button>
+          <button
+            class="tiny-btn"
+            data-act="toggle-transcript"
+            title="${ui.transcriptHidden ? 'Show' : 'Hide'} transcript"
+          >
+            ${icon('eye', 12)}
+          </button>
         </div>
       </div>
       ${
         ui.transcriptHidden
-          ? html`<div class="transcript-hidden">${icon('eye', 18)}<p>Transcript hidden. Audio is still being processed.</p></div>`
+          ? html`<div class="transcript-hidden">
+              ${icon('eye', 18)}
+              <p>Transcript hidden. Audio is still being processed.</p>
+            </div>`
           : html`${ui.sttError ? html`<div class="inline-warning">${icon('zap', 13)}<span>${ui.sttError}</span></div>` : ''}
-          <div class="transcript-scroll" id="transcript-scroll">
-            ${
-              note.transcript.length === 0
-                ? html`<div class="transcript-empty">
-                  ${icon('wave', 20)}
-                  <p>${ui.ai.configured ? 'Listening. The first lines appear after a few seconds.' : 'Capturing levels. Add a speech-to-text key to see words here.'}</p>
-                </div>`
-                : transcriptList(note, true)
-            }
-          </div>`
+              <div class="transcript-scroll" id="transcript-scroll">
+                ${
+                  note.transcript.length === 0
+                    ? html`<div class="transcript-empty">
+                        ${icon('wave', 20)}
+                        <p>
+                          ${ui.ai.sttReady ? (ui.ai.sttSource === 'cloud' ? 'Listening. The first lines appear after a few seconds.' : 'Listening. The first lines appear in about half a minute.') : 'Capturing levels. Choose a speech-to-text model in Settings to see words here.'}
+                        </p>
+                      </div>`
+                    : transcriptList(note, true)
+                }
+              </div>`
       }
     </div>
   </div>`;
@@ -1350,26 +1635,59 @@ function noteTabs(note: Note): Html {
   const tab = ui.noteTab;
   return html`<div class="note-toolbar">
       <div class="tabs" role="tablist">
-        <button class="tab ${tab === 'enhanced' ? 'active' : ''}" data-act="set-tab" data-tab="enhanced" role="tab" aria-selected="${tab === 'enhanced'}">
+        <button
+          class="tab ${tab === 'enhanced' ? 'active' : ''}"
+          data-act="set-tab"
+          data-tab="enhanced"
+          role="tab"
+          aria-selected="${tab === 'enhanced'}"
+        >
           ${icon('sparkle', 13)} Enhanced
         </button>
-        <button class="tab ${tab === 'raw' ? 'active' : ''}" data-act="set-tab" data-tab="raw" role="tab" aria-selected="${tab === 'raw'}">
+        <button
+          class="tab ${tab === 'raw' ? 'active' : ''}"
+          data-act="set-tab"
+          data-tab="raw"
+          role="tab"
+          aria-selected="${tab === 'raw'}"
+        >
           ${icon('pen', 13)} Raw notes
         </button>
-        <button class="tab ${tab === 'transcript' ? 'active' : ''}" data-act="set-tab" data-tab="transcript" role="tab" aria-selected="${tab === 'transcript'}">
-          ${icon('notes', 13)} Transcript <span class="inline-count" id="transcript-tab-count">${note.transcript.length}</span>
+        <button
+          class="tab ${tab === 'transcript' ? 'active' : ''}"
+          data-act="set-tab"
+          data-tab="transcript"
+          role="tab"
+          aria-selected="${tab === 'transcript'}"
+        >
+          ${icon('notes', 13)} Transcript
+          <span class="inline-count" id="transcript-tab-count"
+            >${note.transcript.length}</span
+          >
         </button>
       </div>
       <div class="toolbar-actions">
-        <select class="template-select" id="template-select" data-change="template" data-id="${note.id}" aria-label="Note template">
+        <select
+          class="template-select"
+          id="template-select"
+          data-change="template"
+          data-id="${note.id}"
+          aria-label="Note template"
+        >
           <option value="">Default structure</option>
           ${ui.db.templates.map(
             (template) =>
-              html`<option value="${template.id}" ${note.templateId === template.id ? raw('selected') : ''}>${template.name}</option>`,
+              html`<option
+                value="${template.id}"
+                ${note.templateId === template.id ? raw('selected') : ''}
+              >
+                ${template.name}
+              </option>`,
           )}
         </select>
         <button class="enhance-btn" data-act="enhance" data-id="${note.id}">
-          ${icon('sparkle', 13)} ${note.enhanced ? 'Regenerate' : 'Enhance notes'}
+          ${icon('sparkle', 13)}
+          ${note.enhanced ? 'Regenerate' : 'Enhance notes'}
         </button>
       </div>
     </div>
@@ -1385,7 +1703,9 @@ function noteTabs(note: Note): Html {
 function enhancedPanel(note: Note): Html {
   if (ui.generatingNoteId === note.id) {
     return html`<div class="enhanced loading">
-      <div class="loading-head">${icon('sparkle', 16)} Reading the transcript and your notes…</div>
+      <div class="loading-head">
+        ${icon('sparkle', 16)} Reading the transcript and your notes…
+      </div>
       <div class="skeleton-line w80"></div>
       <div class="skeleton-line w60"></div>
       <div class="skeleton-line w70"></div>
@@ -1396,26 +1716,47 @@ function enhancedPanel(note: Note): Html {
     return html`<div class="empty-enhanced">
       <div class="empty-icon">${icon('sparkle', 22)}</div>
       <h2>Turn this into notes worth keeping.</h2>
-      <p>Lilt combines what you typed with the transcript, then shows the source behind every point. The template shapes the sections; it never invents facts.</p>
-      <button class="enhance-btn large" data-act="enhance" data-id="${note.id}">${icon('sparkle', 14)} Enhance notes</button>
-      <span class="small-note">${ui.ai.configured ? `Using ${ui.ai.chatModel}` : 'No model key: builds an honest extract offline.'}</span>
+      <p>
+        Lilt combines what you typed with the transcript, then shows the source
+        behind every point. The template shapes the sections; it never invents
+        facts.
+      </p>
+      <button class="enhance-btn large" data-act="enhance" data-id="${note.id}">
+        ${icon('sparkle', 14)} Enhance notes
+      </button>
+      <span class="small-note"
+        >${ui.ai.configured ? `Using ${ui.ai.chatModel}` : 'No model key: builds an honest extract offline.'}</span
+      >
     </div>`;
   }
   const template = templateById(note.enhanced.templateId);
   return html`<div class="enhanced">
     <div class="enhanced-meta">
-      <span>${template ? `${template.name} · ` : ''}Generated ${relativeDate(note.enhanced.generatedAt)} · ${note.enhanced.model}</span>
-      <button class="text-btn" data-act="copy-summary" data-id="${note.id}">${icon('copy', 12)} Copy summary</button>
+      <span
+        >${template ? `${template.name} · ` : ''}Generated
+        ${relativeDate(note.enhanced.generatedAt)} ·
+        ${note.enhanced.model}</span
+      >
+      <button class="text-btn" data-act="copy-summary" data-id="${note.id}">
+        ${icon('copy', 12)} Copy summary
+      </button>
     </div>
     ${
       note.share.mode !== 'off'
-        ? html`<div class="shared-notice">${icon('globe', 13)} Link viewers see this summary only — never your raw notes or transcript.</div>`
+        ? html`<div class="shared-notice">
+            ${icon('globe', 13)} Link viewers see this summary only — never your
+            raw notes or transcript.
+          </div>`
         : ''
     }
     ${note.enhanced.sections.map((section) => enhancedSection(note, section))}
     <div class="provenance-help">
       ${icon('search', 12)}
-      <span>The magnifier reveals the transcript or raw note a point came from. Quotes are checked against the source before they are shown as verified.</span>
+      <span
+        >The magnifier reveals the transcript or raw note a point came from.
+        Quotes are checked against the source before they are shown as
+        verified.</span
+      >
     </div>
   </div>`;
 }
@@ -1428,31 +1769,41 @@ function enhancedSection(note: Note, section: Section): Html {
       data-section-id="${section.id}"
       data-note-id="${note.id}"
       spellcheck="false"
-    >${section.heading}</h2>
+    >
+      ${section.heading}
+    </h2>
     <ul>
       ${section.bullets.map(
-        (bullet) => html`<li>
-          <span class="bullet-dot"></span>
-          <span
-            class="bullet-text"
-            contenteditable="plaintext-only"
-            data-bullet-id="${bullet.id}"
-            data-section-id="${section.id}"
-            data-note-id="${note.id}"
-            spellcheck="false"
-          >${bullet.text}</span>
-          ${
-            bullet.source
-              ? html`<details class="source ${bullet.source.kind === 'unverified' ? 'unverified' : ''}">
-                <summary title="See the source">${icon('search', 11)}</summary>
-                <div class="source-pop">
-                  <span class="source-kind">${bullet.source.kind === 'transcript' ? 'From the transcript' : bullet.source.kind === 'raw' ? 'From your raw notes' : 'Could not verify this quote'}</span>
-                  <p>“${bullet.source.quote}”</p>
-                </div>
-              </details>`
-              : ''
-          }
-        </li>`,
+        (bullet) =>
+          html`<li>
+            <span class="bullet-dot"></span>
+            <span
+              class="bullet-text"
+              contenteditable="plaintext-only"
+              data-bullet-id="${bullet.id}"
+              data-section-id="${section.id}"
+              data-note-id="${note.id}"
+              spellcheck="false"
+              >${bullet.text}</span
+            >
+            ${
+              bullet.source
+                ? html`<details
+                    class="source ${bullet.source.kind === 'unverified' ? 'unverified' : ''}"
+                  >
+                    <summary title="See the source">
+                      ${icon('search', 11)}
+                    </summary>
+                    <div class="source-pop">
+                      <span class="source-kind"
+                        >${bullet.source.kind === 'transcript' ? 'From the transcript' : bullet.source.kind === 'raw' ? 'From your raw notes' : 'Could not verify this quote'}</span
+                      >
+                      <p>“${bullet.source.quote}”</p>
+                    </div>
+                  </details>`
+                : ''
+            }
+          </li>`,
       )}
     </ul>
   </section>`;
@@ -1466,11 +1817,15 @@ function rawPanel(note: Note): Html {
       data-id="${note.id}"
       placeholder="What happened? Names, numbers, decisions, the thing you almost forgot. Nothing here needs to be polished."
       spellcheck="false"
-    >${note.rawNotes}</textarea>
+    >
+${note.rawNotes}</textarea>
     <div class="raw-foot">
-      <span id="raw-count">${note.rawNotes.trim() ? `${note.rawNotes.trim().split(/\s+/).length} words · saved` : 'Raw notes stay private to you'}</span>
+      <span id="raw-count"
+        >${note.rawNotes.trim() ? `${note.rawNotes.trim().split(/\s+/).length} words · saved` : 'Raw notes stay private to you'}</span
+      >
       <button class="text-btn" data-act="enhance" data-id="${note.id}">
-        ${icon('sparkle', 12)} ${note.enhanced ? 'Regenerate from these notes' : 'Enhance with transcript'}
+        ${icon('sparkle', 12)}
+        ${note.enhanced ? 'Regenerate from these notes' : 'Enhance with transcript'}
       </button>
     </div>
   </div>`;
@@ -1496,12 +1851,15 @@ function transcriptPanel(note: Note): Html {
     ${
       note.transcript.length === 0
         ? html`<div class="transcript-empty large">
-          ${icon('wave', 24)}
-          <p>No transcript for this note. Transcripts appear only when you record with a speech-to-text provider configured.</p>
-        </div>`
+            ${icon('wave', 24)}
+            <p>
+              No transcript for this note. Transcripts appear only when you
+              record with a speech-to-text model configured.
+            </p>
+          </div>`
         : html`<div class="transcript-scroll static" id="transcript-scroll">
-          ${transcriptList(note, false)}
-        </div>`
+            ${transcriptList(note, false)}
+          </div>`
     }
   </div>`;
 }
@@ -1520,25 +1878,40 @@ function transcriptList(note: Note, live: boolean): Html {
     </div>`;
   }
   return html`${segments.map(
-    (
-      segment,
-    ) => html`<div class="seg ${segment.source === 'mic' ? 'me' : 'them'}">
-      <div class="seg-meta">
-        <span class="seg-speaker">${segment.speaker}</span>
-        <span>${formatClock(segment.startMs)}</span>
-        <span class="seg-actions">
-          <button class="tiny-btn" data-act="copy-segment" data-id="${segment.id}" title="Copy line">${icon('copy', 10)}</button>
-          <button class="tiny-btn danger" data-act="delete-segment" data-id="${segment.id}" title="Delete line">${icon('x', 10)}</button>
-        </span>
-      </div>
-      <div class="seg-text">${segment.text}</div>
-    </div>`,
+    (segment) =>
+      html`<div class="seg ${segment.source === 'mic' ? 'me' : 'them'}">
+        <div class="seg-meta">
+          <span class="seg-speaker">${segment.speaker}</span>
+          <span>${formatClock(segment.startMs)}</span>
+          <span class="seg-actions">
+            <button
+              class="tiny-btn"
+              data-act="copy-segment"
+              data-id="${segment.id}"
+              title="Copy line"
+            >
+              ${icon('copy', 10)}
+            </button>
+            <button
+              class="tiny-btn danger"
+              data-act="delete-segment"
+              data-id="${segment.id}"
+              title="Delete line"
+            >
+              ${icon('x', 10)}
+            </button>
+          </span>
+        </div>
+        <div class="seg-text">${segment.text}</div>
+      </div>`,
   )}${
     live
-      ? html`<div class="seg listening ${note.status === 'paused' ? 'paused' : ''}">
-        <span class="listening-dot"></span>
-        <span>${note.status === 'paused' ? 'Paused' : 'Listening…'}</span>
-      </div>`
+      ? html`<div
+          class="seg listening ${note.status === 'paused' ? 'paused' : ''}"
+        >
+          <span class="listening-dot"></span>
+          <span>${note.status === 'paused' ? 'Paused' : 'Listening…'}</span>
+        </div>`
       : ''
   }`;
 }
@@ -1580,29 +1953,45 @@ const LIST_VIEWS = new Set([
 function renderAll(): void {
   mount(
     root,
-    html`<div class="app">
-      ${railView()}
-      ${
-        LIST_VIEWS.has(ui.view.name)
-          ? html`<section class="listpane" id="list-pane">${listPane()}</section>`
-          : ''
-      }
-      <main class="main" id="main">${mainView()}</main>
-      <div id="chat-root">${ui.chatOpen ? chatPane() : ''}</div>
-    </div>
-    <div id="modal-root">${modalView()}</div>
-    <div id="reminder-root">${reminder ? reminderView() : ''}</div>
-    <div id="toast-root">${toastView()}</div>`,
+    html`<div class="app ${ui.railClosed ? 'rail-closed' : ''}">
+        ${railView()}
+        ${
+          LIST_VIEWS.has(ui.view.name)
+            ? html`<section class="listpane" id="list-pane">
+                ${listPane()}
+              </section>`
+            : ''
+        }
+        <main class="main" id="main">${mainView()}</main>
+        <div id="chat-root">${ui.chatOpen ? chatPane() : ''}</div>
+      </div>
+      <div id="modal-root">${modalView()}</div>
+      <div id="reminder-root">${reminder ? reminderView() : ''}</div>
+      <div id="toast-root">${toastView()}</div>`,
   );
   afterRender();
   ui.focusTitle = false;
   ui.focusChat = false;
 }
 
+// Toggled in place (no re-render) so the CSS transition can run.
+function toggleRail(): void {
+  ui.railClosed = !ui.railClosed;
+  document
+    .querySelector('.app')
+    ?.classList.toggle('rail-closed', ui.railClosed);
+  const button = document.querySelector('.rail-toggle');
+  if (!button) return;
+  button.setAttribute('aria-expanded', String(!ui.railClosed));
+  button.setAttribute(
+    'aria-label',
+    ui.railClosed ? 'Expand sidebar' : 'Collapse sidebar',
+  );
+}
+
 function renderList(): void {
   mount(document.getElementById('list-pane'), listPane());
 }
-
 function renderListSoon(): void {
   if (listRenderTimer !== null) window.clearTimeout(listRenderTimer);
   listRenderTimer = window.setTimeout(() => {
@@ -1671,10 +2060,18 @@ function railView(): Html {
     (space) => space.kind !== 'personal' && space.kind !== 'team',
   );
   return html`<aside class="rail">
+    <button
+      class="rail-toggle"
+      data-act="toggle-rail"
+      aria-label="${ui.railClosed ? 'Expand sidebar' : 'Collapse sidebar'}"
+      aria-expanded="${String(!ui.railClosed)}"
+    >
+      ${icon('panel', 15)}
+    </button>
     <button class="brand" data-act="nav" data-view="home">
       ${brandMark()} <span>Lilt</span>
     </button>
-    <button class="new-note-btn" data-act="new-note">
+    <button class="new-note-btn" data-act="new-note" title="New note">
       ${icon('plus', 15)} <span>New note</span> <kbd>⌘N</kbd>
     </button>
     <label class="rail-search">
@@ -1696,39 +2093,33 @@ function railView(): Html {
       ${navButton('trash', 'Trash', 'trash', ui.db.notes.filter((note) => note.deletedAt).length || undefined)}
     </nav>
     <div class="rail-scroll">
-      ${personal ? spaceBlock(personal) : ''}
-      ${team ? spaceBlock(team) : ''}
+      ${personal ? spaceBlock(personal) : ''} ${team ? spaceBlock(team) : ''}
       ${custom.map((space) => spaceBlock(space))}
+      <button class="rail-link rail-add" data-act="new-space" title="New space">
+        ${icon('plus', 12)} <span>New space</span>
+      </button>
     </div>
     <div class="rail-foot">
-      <button class="plan-chip" data-act="nav" data-view="settings">
+      <div class="plan-chip">
         <span class="plan-dot"></span>
-        ${
-          ui.db.workspace.plan === 'free'
-            ? `Free · ${ui.db.settings.historyDays}-day history`
-            : `${planName(ui.db.workspace.plan)} plan`
-        }
-      </button>
-      <button class="rail-link" data-act="nav" data-view="settings">
-        ${icon('settings', 15)} Settings
+        On this device · no account
+      </div>
+      <button
+        class="rail-link"
+        data-act="nav"
+        data-view="settings"
+        title="Settings"
+      >
+        ${icon('settings', 15)} <span>Settings</span>
       </button>
       <div class="user-row">
         ${avatar(ui.db.user.name, 26)}
         <div class="user-copy">
           <strong>${ui.db.user.name}</strong>
-          <span>${ui.db.user.email}</span>
         </div>
       </div>
     </div>
   </aside>`;
-}
-
-function planName(plan: Plan): string {
-  return plan === 'free'
-    ? 'Free'
-    : plan === 'business'
-      ? 'Business'
-      : 'Enterprise';
 }
 
 function navButton(
@@ -1745,6 +2136,7 @@ function navButton(
     class="rail-nav-item ${active ? 'active' : ''}"
     data-act="nav"
     data-view="${view}"
+    title="${label}"
   >
     ${icon(iconName, 15)} <span>${label}</span>
     ${count ? html`<span class="nav-count">${count}</span>` : ''}
@@ -1764,8 +2156,17 @@ function spaceBlock(space: Space): Html {
         data-view="space"
         data-id="${space.id}"
       >
-        ${icon(space.kind === 'personal' ? 'lock' : 'people', 13)}
+        ${icon(space.kind === 'personal' ? 'lock' : space.kind === 'team' ? 'people' : 'briefcase', 13)}
         <span>${space.name}</span>
+      </button>
+      <button
+        class="tiny-btn"
+        data-act="edit-space"
+        data-id="${space.id}"
+        title="Edit ${space.name}"
+        aria-label="Edit ${space.name}"
+      >
+        ${icon('pen', 12)}
       </button>
       <button
         class="tiny-btn"
@@ -1783,46 +2184,46 @@ function spaceBlock(space: Space): Html {
   </div>`;
 }
 
-function folderBranch(folder: Folder): Html {
+function folderBranch(
+  folder: Folder,
+  depth = 0,
+  seen = new Set<string>(),
+): Html {
+  if (seen.has(folder.id)) return html``;
+  seen.add(folder.id);
   const children = ui.db.folders.filter(
     (child) => child.parentId === folder.id,
   );
   const active = ui.view.name === 'folder' && ui.view.folderId === folder.id;
+  const nested = folderDescendants(ui.db.folders, folder.id);
   const noteCount = visibleNotes(ui.db).filter((note) =>
-    note.folderIds.includes(folder.id),
+    note.folderIds.some((id) => nested.has(id)),
   ).length;
   return html`<div class="folder-branch">
-    <button
-      class="folder-row ${active ? 'active' : ''}"
-      data-act="nav"
-      data-view="folder"
-      data-id="${folder.id}"
-      title="${folder.description || folder.name}"
-    >
-      ${icon(folderIcon(folder.icon), 13)}
-      <span>${folder.name}</span>
-      ${noteCount ? html`<span class="folder-count">${noteCount}</span>` : ''}
-    </button>
-    ${
-      children.length
-        ? html`<div class="folder-children">
-          ${children.map((child) => {
-            const childActive =
-              ui.view.name === 'folder' && ui.view.folderId === child.id;
-            return html`<button
-              class="folder-row sub ${childActive ? 'active' : ''}"
-              data-act="nav"
-              data-view="folder"
-              data-id="${child.id}"
-              title="${child.description || child.name}"
-            >
-              ${icon(folderIcon(child.icon), 12)}
-              <span>${child.name}</span>
-            </button>`;
-          })}
-        </div>`
-        : ''
-    }
+    <div class="folder-line">
+      <button
+        class="folder-row ${depth ? 'sub' : ''} ${active ? 'active' : ''}"
+        style="padding-left:${15 + depth * 13}px"
+        data-act="nav"
+        data-view="folder"
+        data-id="${folder.id}"
+        title="${folder.description || folderPath(ui.db.folders, folder.id)}"
+      >
+        ${icon(folderIcon(folder.icon), 13)}
+        <span>${folder.name}</span>
+        ${noteCount ? html`<span class="folder-count">${noteCount}</span>` : ''}
+      </button>
+      <button
+        class="tiny-btn folder-delete"
+        data-act="delete-folder"
+        data-id="${folder.id}"
+        title="Delete ${folder.name}"
+        aria-label="Delete ${folder.name}"
+      >
+        ${icon('trash', 12)}
+      </button>
+    </div>
+    ${children.map((child) => folderBranch(child, depth + 1, seen))}
   </div>`;
 }
 
@@ -1867,7 +2268,8 @@ function listNotes(): Note[] {
   if (view.name === 'space') {
     notes = notes.filter((note) => note.spaceId === view.spaceId);
   } else if (view.name === 'folder') {
-    notes = notes.filter((note) => note.folderIds.includes(view.folderId));
+    const nested = folderDescendants(ui.db.folders, view.folderId);
+    notes = notes.filter((note) => note.folderIds.some((id) => nested.has(id)));
   } else if (view.name === 'person') {
     notes = notes.filter((note) =>
       note.attendees.some(
@@ -1884,7 +2286,6 @@ function listPane(): Html {
   const meta = collectionMeta();
   const allSelected =
     notes.length > 0 && notes.every((note) => ui.selected.has(note.id));
-  const hidden = hiddenByHistory(ui.db);
   return html`<header class="list-head">
       <div class="list-title">
         <h2>${meta.listTitle}</h2>
@@ -1903,34 +2304,30 @@ function listPane(): Html {
     ${
       ui.query.trim()
         ? html`<div class="list-filter">
-          ${icon('search', 12)} Results for “${ui.query}”
-          <button class="link-btn" data-act="clear-search">Clear</button>
-        </div>`
+            ${icon('search', 12)} Results for “${ui.query}”
+            <button class="link-btn" data-act="clear-search">Clear</button>
+          </div>`
         : ''
     }
     <div class="note-list">
       ${
         notes.length === 0
           ? html`<div class="list-empty">
-            ${icon('notes', 22)}
-            <p>${ui.query.trim() ? 'No notes match that search.' : ui.view.name === 'trash' ? 'Trash is empty.' : 'No notes here yet.'}</p>
-            ${
-              !ui.query.trim() && ui.view.name !== 'trash'
-                ? html`<button class="text-btn" data-act="new-note">Start a note ${icon('arrowRight', 12)}</button>`
-                : ''
-            }
-          </div>`
+              ${icon('notes', 22)}
+              <p>
+                ${ui.query.trim() ? 'No notes match that search.' : ui.view.name === 'trash' ? 'Trash is empty.' : 'No notes here yet.'}
+              </p>
+              ${
+                !ui.query.trim() && ui.view.name !== 'trash'
+                  ? html`<button class="text-btn" data-act="new-note">
+                      Start a note ${icon('arrowRight', 12)}
+                    </button>`
+                  : ''
+              }
+            </div>`
           : notes.map((note) => noteRow(note))
       }
-    </div>
-    ${
-      hidden > 0 && ui.view.name !== 'trash'
-        ? html`<button class="history-hint" data-act="nav" data-view="settings">
-          ${icon('clock', 13)}
-          <span>${hidden} older ${hidden === 1 ? 'note is' : 'notes are'} hidden by your ${ui.db.settings.historyDays}-day history.</span>
-        </button>`
-        : ''
-    }`;
+    </div>`;
 }
 
 function noteRow(note: Note): Html {
@@ -1942,11 +2339,27 @@ function noteRow(note: Note): Html {
       <div class="row-main">
         <div class="row-title">${note.title}</div>
         <div class="row-snippet">${noteSummary(note)}</div>
-        <div class="row-meta"><span>Deleted ${relativeDate(note.deletedAt ?? note.updatedAt)}</span></div>
+        <div class="row-meta">
+          <span>Deleted ${relativeDate(note.deletedAt ?? note.updatedAt)}</span>
+        </div>
       </div>
       <div class="trash-actions">
-        <button class="tiny-btn" data-act="restore-note" data-id="${note.id}" title="Restore">${icon('refresh', 13)}</button>
-        <button class="tiny-btn danger" data-act="delete-forever" data-id="${note.id}" title="Delete forever">${icon('trash', 13)}</button>
+        <button
+          class="tiny-btn"
+          data-act="restore-note"
+          data-id="${note.id}"
+          title="Restore"
+        >
+          ${icon('refresh', 13)}
+        </button>
+        <button
+          class="tiny-btn danger"
+          data-act="delete-forever"
+          data-id="${note.id}"
+          title="Delete forever"
+        >
+          ${icon('trash', 13)}
+        </button>
       </div>
     </article>`;
   }
@@ -1968,9 +2381,7 @@ function noteRow(note: Note): Html {
         <div class="row-title">${note.title}</div>
         ${
           note.status === 'recording'
-            ? html`
-                <span class="rec-mini">Recording</span>
-              `
+            ? html` <span class="rec-mini">Recording</span> `
             : ''
         }
       </div>
@@ -1979,12 +2390,15 @@ function noteRow(note: Note): Html {
         <span>${relativeDate(note.createdAt)}</span>
         ${
           note.durationMs > 0
-            ? html`<span class="dot-sep">·</span><span>${formatDuration(note.durationMs)}</span>`
+            ? html`<span class="dot-sep">·</span
+                ><span>${formatDuration(note.durationMs)}</span>`
             : ''
         }
         ${
           folder
-            ? html`<span class="folder-tag">${icon('folder', 10)}${folder.name}</span>`
+            ? html`<span class="folder-tag"
+                >${icon('folder', 10)}${folder.name}</span
+              >`
             : ''
         }
       </div>
@@ -1996,10 +2410,22 @@ function bulkBar(): Html {
   return html`<div class="bulk-bar">
     <strong>${ui.selected.size}</strong> selected
     <div class="bulk-actions">
-      <button class="tiny-btn" data-act="bulk-move" title="Add to folder">${icon('folder', 13)}</button>
-      <button class="tiny-btn" data-act="bulk-export" title="Export CSV">${icon('download', 13)}</button>
-      <button class="tiny-btn danger" data-act="bulk-delete" title="Delete">${icon('trash', 13)}</button>
-      <button class="tiny-btn" data-act="clear-selection" title="Clear selection">${icon('x', 13)}</button>
+      <button class="tiny-btn" data-act="bulk-move" title="Add to folder">
+        ${icon('folder', 13)}
+      </button>
+      <button class="tiny-btn" data-act="bulk-export" title="Export CSV">
+        ${icon('download', 13)}
+      </button>
+      <button class="tiny-btn danger" data-act="bulk-delete" title="Delete">
+        ${icon('trash', 13)}
+      </button>
+      <button
+        class="tiny-btn"
+        data-act="clear-selection"
+        title="Clear selection"
+      >
+        ${icon('x', 13)}
+      </button>
     </div>
   </div>`;
 }
@@ -2039,7 +2465,7 @@ function collectionMeta(): CollectionMeta {
     const space = spaceById(ui.view.spaceId);
     return {
       listTitle: space?.name ?? 'Space',
-      eyebrow: space?.kind === 'team' ? 'Team space' : 'Private space',
+      eyebrow: space?.kind === 'personal' ? 'Private space' : 'Space',
       title: space?.name ?? 'Space',
       description: space?.description ?? '',
       scope: scopeForView(),
@@ -2097,46 +2523,61 @@ function collectionMeta(): CollectionMeta {
 function collectionOverview(): Html {
   const meta = collectionMeta();
   const notes = listNotes();
-  const hidden = hiddenByHistory(ui.db);
   return html`<div class="page">
     <header class="page-head">
       <div class="eyebrow">${meta.eyebrow}</div>
       <h1>${meta.title}</h1>
       <p class="lede">${meta.description}</p>
       <div class="page-actions">
-        <button class="primary-btn" data-act="new-note">${icon('plus', 14)} New note</button>
+        <button class="primary-btn" data-act="new-note">
+          ${icon('plus', 14)} New note
+        </button>
+        ${
+          meta.folderId
+            ? html`<button
+                class="ghost-btn"
+                data-act="new-folder"
+                data-space="${meta.spaceId}"
+                data-parent="${meta.folderId}"
+              >
+                ${icon('folder', 14)} New subfolder
+              </button>`
+            : ''
+        }
         <button class="ghost-btn" data-act="open-chat">
-          ${icon('chat', 14)} Ask ${ui.view.name === 'folder' ? 'this folder' : ui.view.name === 'person' ? 'about them' : 'across notes'}
+          ${icon('chat', 14)} Ask
+          ${ui.view.name === 'folder' ? 'this folder' : ui.view.name === 'person' ? 'about them' : 'across notes'}
         </button>
       </div>
     </header>
     ${
-      hidden > 0
-        ? html`<button class="notice-card" data-act="nav" data-view="settings">
-          ${icon('clock', 16)}
-          <span><strong>${hidden} older ${hidden === 1 ? 'note is' : 'notes are'} hidden.</strong> Your Free plan keeps ${ui.db.settings.historyDays} days of history. Nothing was deleted.</span>
-          ${icon('arrowRight', 14)}
-        </button>`
-        : ''
-    }
-    ${
       notes.length === 0
         ? html`<div class="blank-state">
-          ${icon('mic', 26)}
-          <h2>${ui.query.trim() ? 'Nothing matches that.' : 'A quiet room, ready when you are.'}</h2>
-          <p>${ui.query.trim() ? 'Try a different person, phrase, or date.' : 'Open a new note before the call. Nothing records until you press start.'}</p>
-          <button class="primary-btn" data-act="new-note">${icon('plus', 14)} Start a note</button>
-        </div>`
+            ${icon('mic', 26)}
+            <h2>
+              ${ui.query.trim() ? 'Nothing matches that.' : 'A quiet room, ready when you are.'}
+            </h2>
+            <p>
+              ${ui.query.trim() ? 'Try a different person, phrase, or date.' : 'Open a new note before the call. Nothing records until you press start.'}
+            </p>
+            <button class="primary-btn" data-act="new-note">
+              ${icon('plus', 14)} Start a note
+            </button>
+          </div>`
         : html`<div class="collection-grid">
-          ${notes.slice(0, 8).map((note) => collectionCard(note))}
-        </div>`
+            ${notes.slice(0, 8).map((note) => collectionCard(note))}
+          </div>`
     }
   </div>`;
 }
 
 function collectionCard(note: Note): Html {
   const folder = note.folderIds[0] ? folderById(note.folderIds[0]) : null;
-  return html`<button class="note-card" data-act="open-note" data-id="${note.id}">
+  return html`<button
+    class="note-card"
+    data-act="open-note"
+    data-id="${note.id}"
+  >
     <div class="card-top">
       <span class="card-date">${relativeDate(note.createdAt)}</span>
       ${folder ? html`<span class="folder-tag">${icon('folder', 10)}${folder.name}</span>` : ''}
@@ -2171,36 +2612,54 @@ function homeView(): Html {
       ),
     ),
   );
-  const hidden = hiddenByHistory(ui.db);
   const hour = new Date().getHours();
   const greeting =
     hour < 12 ? 'Good morning' : hour < 18 ? 'Good afternoon' : 'Good evening';
   const recent = notes.slice(0, 4);
   return html`<div class="page home">
     <header class="home-head">
-      <div class="eyebrow">${new Date().toLocaleDateString('en', { weekday: 'long', month: 'long', day: 'numeric' })}</div>
+      <div class="eyebrow">
+        ${new Date().toLocaleDateString('en', { weekday: 'long', month: 'long', day: 'numeric' })}
+      </div>
       <h1>${greeting}, ${firstName()}.</h1>
-      <p class="lede">Your meetings, remembered. No bot joins the call, and nothing records until you start it.</p>
+      <p class="lede">
+        Your meetings, remembered. No bot joins the call, and nothing records
+        until you start it.
+      </p>
       <div class="home-actions">
-        <button class="primary-btn" data-act="new-note">${icon('plus', 14)} Start a note</button>
-        <button class="ghost-btn" data-act="open-chat">${icon('chat', 14)} Ask across meetings</button>
+        <button class="primary-btn" data-act="new-note">
+          ${icon('plus', 14)} Start a note
+        </button>
+        <button class="ghost-btn" data-act="open-chat">
+          ${icon('chat', 14)} Ask across meetings
+        </button>
       </div>
     </header>
 
     ${
       next
         ? html`<section class="coming-card">
-          <div class="coming-icon">${icon('calendar', 16)}</div>
-          <div class="coming-copy">
-            <span class="coming-when">${startsInLabel(next)} · ${eventTime(next)}</span>
-            <strong>${next.title}</strong>
-            <span>${next.attendees.length ? next.attendees.slice(0, 3).join(', ') : 'No attendees'}${next.attendees.length > 3 ? ` +${next.attendees.length - 3}` : ''}</span>
-          </div>
-          <div class="coming-actions">
-            <button class="primary-btn small" data-act="start-event" data-key="${calendarEventKey(next)}">${icon('mic', 12)} Take notes</button>
-            ${next.meetingUrl ? html`<button class="ghost-btn small" data-act="join-link" data-key="${calendarEventKey(next)}">${icon('external', 12)} Join</button>` : ''}
-          </div>
-        </section>`
+            <div class="coming-icon">${icon('calendar', 16)}</div>
+            <div class="coming-copy">
+              <span class="coming-when"
+                >${startsInLabel(next)} · ${eventTime(next)}</span
+              >
+              <strong>${next.title}</strong>
+              <span
+                >${next.attendees.length ? next.attendees.slice(0, 3).join(', ') : 'No attendees'}${next.attendees.length > 3 ? ` +${next.attendees.length - 3}` : ''}</span
+              >
+            </div>
+            <div class="coming-actions">
+              <button
+                class="primary-btn small"
+                data-act="start-event"
+                data-key="${calendarEventKey(next)}"
+              >
+                ${icon('mic', 12)} Take notes
+              </button>
+              ${next.meetingUrl ? html`<button class="ghost-btn small" data-act="join-link" data-key="${calendarEventKey(next)}">${icon('external', 12)} Join</button>` : ''}
+            </div>
+          </section>`
         : ''
     }
 
@@ -2208,7 +2667,9 @@ function homeView(): Html {
       <div class="stat-card">
         <span class="stat-label">This week</span>
         <strong>${thisWeek.length}</strong>
-        <span class="stat-sub">${thisWeek.length === 1 ? 'meeting' : 'meetings'} captured</span>
+        <span class="stat-sub"
+          >${thisWeek.length === 1 ? 'meeting' : 'meetings'} captured</span
+        >
       </div>
       <div class="stat-card">
         <span class="stat-label">Time remembered</span>
@@ -2220,55 +2681,72 @@ function homeView(): Html {
         <strong>${people.size}</strong>
         <span class="stat-sub">in your meeting memory</span>
       </div>
-      <button class="stat-card accent" data-act="nav" data-view="settings">
-        <span class="stat-label">${planName(ui.db.workspace.plan)} plan</span>
-        <strong>${hidden > 0 ? hidden : '∞'}</strong>
-        <span class="stat-sub">${hidden > 0 ? `older notes hidden by ${ui.db.settings.historyDays}-day history` : 'full history available'}</span>
-        <span class="stat-arrow">${icon('arrowRight', 13)}</span>
-      </button>
+      <div class="stat-card accent">
+        <span class="stat-label">Folders</span>
+        <strong>${ui.db.folders.length}</strong>
+        <span class="stat-sub">nested as deep as you need</span>
+      </div>
     </div>
 
     ${
       recent.length > 0
         ? html`<section class="home-section">
-          <div class="section-head">
-            <h2>Continue</h2>
-            <button class="text-btn" data-act="nav" data-view="notes">All notes ${icon('arrowRight', 12)}</button>
-          </div>
-          <div class="continue-grid">
-            ${recent.slice(0, 2).map((note) => collectionCard(note))}
-          </div>
-        </section>
-        <section class="home-section">
-          <div class="section-head"><h2>Latest notes</h2></div>
-          <div class="latest-list">
-            ${recent.map(
-              (
-                note,
-              ) => html`<button class="latest-row" data-act="open-note" data-id="${note.id}">
-              <span class="latest-title">${note.title}</span>
-              <span class="latest-snippet">${noteSummary(note)}</span>
-              <span class="latest-date">${relativeDate(note.createdAt)}</span>
-              ${icon('arrowRight', 13)}
-            </button>`,
-            )}
-          </div>
-        </section>`
+              <div class="section-head">
+                <h2>Continue</h2>
+                <button class="text-btn" data-act="nav" data-view="notes">
+                  All notes ${icon('arrowRight', 12)}
+                </button>
+              </div>
+              <div class="continue-grid">
+                ${recent.slice(0, 2).map((note) => collectionCard(note))}
+              </div>
+            </section>
+            <section class="home-section">
+              <div class="section-head"><h2>Latest notes</h2></div>
+              <div class="latest-list">
+                ${recent.map(
+                  (note) =>
+                    html`<button
+                      class="latest-row"
+                      data-act="open-note"
+                      data-id="${note.id}"
+                    >
+                      <span class="latest-title">${note.title}</span>
+                      <span class="latest-snippet">${noteSummary(note)}</span>
+                      <span class="latest-date"
+                        >${relativeDate(note.createdAt)}</span
+                      >
+                      ${icon('arrowRight', 13)}
+                    </button>`,
+                )}
+              </div>
+            </section>`
         : html`<div class="blank-state home-blank">
-          ${icon('wave', 26)}
-          <h2>Your first note is the only hard one.</h2>
-          <p>Open a note, press start, and type whatever you hear. Lilt turns the rough notes and transcript into something you can keep.</p>
-          <button class="primary-btn" data-act="new-note">${icon('plus', 14)} Start a note</button>
-        </div>`
+            ${icon('wave', 26)}
+            <h2>Your first note is the only hard one.</h2>
+            <p>
+              Open a note, press start, and type whatever you hear. Lilt turns
+              the rough notes and transcript into something you can keep.
+            </p>
+            <button class="primary-btn" data-act="new-note">
+              ${icon('plus', 14)} Start a note
+            </button>
+          </div>`
     }
 
     <section class="privacy-card">
       <div class="privacy-icon">${icon('lock', 18)}</div>
       <div>
         <h3>Private until you share it.</h3>
-        <p>Audio is transcribed in chunks and discarded. Only the transcript, your notes and the enhanced summary are saved. Shared links never expose the transcript.</p>
+        <p>
+          Audio is transcribed in chunks and discarded. Only the transcript,
+          your notes and the enhanced summary are saved. Shared links never
+          expose the transcript.
+        </p>
       </div>
-      <button class="text-btn" data-act="nav" data-view="settings">Data controls ${icon('arrowRight', 12)}</button>
+      <button class="text-btn" data-act="nav" data-view="settings">
+        Data controls ${icon('arrowRight', 12)}
+      </button>
     </section>
   </div>`;
 }
@@ -2303,29 +2781,41 @@ function peopleView(): Html {
     <header class="page-head">
       <div class="eyebrow">Directory</div>
       <h1>People</h1>
-      <p class="lede">Built quietly from the attendees on your notes. No manual contact list, no enrichment you did not ask for.</p>
+      <p class="lede">
+        Built quietly from the attendees on your notes. No manual contact list,
+        no enrichment you did not ask for.
+      </p>
     </header>
     ${
       people.length === 0
         ? html`<div class="blank-state">
-          ${icon('people', 26)}
-          <h2>No people yet.</h2>
-          <p>Add attendees to a note and they will appear here with every conversation you share.</p>
-        </div>`
+            ${icon('people', 26)}
+            <h2>No people yet.</h2>
+            <p>
+              Add attendees to a note and they will appear here with every
+              conversation you share.
+            </p>
+          </div>`
         : html`<div class="people-grid">
-          ${people.map(
-            (
-              person,
-            ) => html`<button class="person-card" data-act="open-person" data-person="${person.name}">
-              ${avatar(person.name, 42)}
-              <span class="person-copy">
-                <strong>${person.name}</strong>
-                <span>${person.count} ${person.count === 1 ? 'note' : 'notes'} · last ${relativeDate(person.last)}</span>
-              </span>
-              ${icon('arrowRight', 14)}
-            </button>`,
-          )}
-        </div>`
+            ${people.map(
+              (person) =>
+                html`<button
+                  class="person-card"
+                  data-act="open-person"
+                  data-person="${person.name}"
+                >
+                  ${avatar(person.name, 42)}
+                  <span class="person-copy">
+                    <strong>${person.name}</strong>
+                    <span
+                      >${person.count} ${person.count === 1 ? 'note' : 'notes'}
+                      · last ${relativeDate(person.last)}</span
+                    >
+                  </span>
+                  ${icon('arrowRight', 14)}
+                </button>`,
+            )}
+          </div>`
     }
   </div>`;
 }
@@ -2338,19 +2828,30 @@ function personView(person: string): Html {
       <div>
         <div class="eyebrow">Person</div>
         <h1>${person}</h1>
-        <p class="lede">${notes.length} ${notes.length === 1 ? 'conversation' : 'conversations'} in your notes. Ask Lilt what you committed to, or what is still open.</p>
+        <p class="lede">
+          ${notes.length}
+          ${notes.length === 1 ? 'conversation' : 'conversations'} in your
+          notes. Ask Lilt what you committed to, or what is still open.
+        </p>
         <div class="page-actions">
-          <button class="primary-btn" data-act="open-chat">${icon('chat', 14)} Ask about ${person.split(' ')[0]}</button>
-          <button class="ghost-btn" data-act="nav" data-view="people">All people</button>
+          <button class="primary-btn" data-act="open-chat">
+            ${icon('chat', 14)} Ask about ${person.split(' ')[0]}
+          </button>
+          <button class="ghost-btn" data-act="nav" data-view="people">
+            All people
+          </button>
         </div>
       </div>
     </header>
     ${
       notes.length === 0
-        ? html`<div class="blank-state">${icon('notes', 24)}<h2>No notes with ${person}.</h2></div>`
+        ? html`<div class="blank-state">
+            ${icon('notes', 24)}
+            <h2>No notes with ${person}.</h2>
+          </div>`
         : html`<div class="collection-grid">
-          ${notes.map((note) => collectionCard(note))}
-        </div>`
+            ${notes.map((note) => collectionCard(note))}
+          </div>`
     }
   </div>`;
 }
@@ -2360,42 +2861,74 @@ function recipesView(): Html {
     <header class="page-head">
       <div class="eyebrow">Saved prompts</div>
       <h1>Recipes</h1>
-      <p class="lede">The questions you ask every week, saved once. Invoke one with <kbd>/</kbd> in the chat bar.</p>
+      <p class="lede">
+        The questions you ask every week, saved once. Invoke one with
+        <kbd>/</kbd> in the chat bar.
+      </p>
       <div class="page-actions">
-        <button class="primary-btn" data-act="new-recipe">${icon('plus', 14)} New recipe</button>
-        <button class="ghost-btn" data-act="nav" data-view="notes">Open a note</button>
+        <button class="primary-btn" data-act="new-recipe">
+          ${icon('plus', 14)} New recipe
+        </button>
+        <button class="ghost-btn" data-act="nav" data-view="notes">
+          Open a note
+        </button>
       </div>
     </header>
     <div class="recipe-grid">
       ${ui.db.recipes.map(
-        (recipe) => html`<article class="recipe-card">
-          <div class="card-top">
-            <span class="scope-badge">${recipe.scope === 'single' ? 'Single meeting' : 'Multiple meetings'}</span>
-            <span class="recipe-model">${modelLabel(recipe.model)}</span>
-          </div>
-          <h3>${recipe.name}</h3>
-          <p>${recipe.prompt}</p>
-          <div class="card-foot">
-            <span>${recipe.visibility === 'workspace' ? 'Workspace' : 'Private'}</span>
-            <div class="recipe-actions">
-              ${
-                recipe.scope === 'single'
-                  ? html`<button class="tiny-btn" disabled title="Open a meeting to use this recipe">${icon('play', 12)}</button>`
-                  : html`<button class="tiny-btn" data-act="run-recipe" data-id="${recipe.id}" title="Use recipe">${icon('play', 12)}</button>`
-              }
-              ${
-                recipe.visibility === 'private'
-                  ? html`<button class="tiny-btn danger" data-act="delete-recipe" data-id="${recipe.id}" title="Delete recipe">${icon('trash', 12)}</button>`
-                  : ''
-              }
+        (recipe) =>
+          html`<article class="recipe-card">
+            <div class="card-top">
+              <span class="scope-badge"
+                >${recipe.scope === 'single' ? 'Single meeting' : 'Multiple meetings'}</span
+              >
+              <span class="recipe-model">${modelLabel(recipe.model)}</span>
             </div>
-          </div>
-        </article>`,
+            <h3>${recipe.name}</h3>
+            <p>${recipe.prompt}</p>
+            <div class="card-foot">
+              <span
+                >${recipe.scope === 'single' ? 'Ask from a meeting' : 'Ask anywhere'}</span
+              >
+              <div class="recipe-actions">
+                ${
+                  recipe.scope === 'single'
+                    ? html`<button
+                        class="tiny-btn"
+                        disabled
+                        title="Open a meeting to use this recipe"
+                      >
+                        ${icon('play', 12)}
+                      </button>`
+                    : html`<button
+                        class="tiny-btn"
+                        data-act="run-recipe"
+                        data-id="${recipe.id}"
+                        title="Use recipe"
+                      >
+                        ${icon('play', 12)}
+                      </button>`
+                }
+                <button
+                  class="tiny-btn danger"
+                  data-act="delete-recipe"
+                  data-id="${recipe.id}"
+                  title="Delete recipe"
+                >
+                  ${icon('trash', 12)}
+                </button>
+              </div>
+            </div>
+          </article>`,
       )}
     </div>
     <div class="tip-card">
       ${icon('sparkle', 16)}
-      <p><strong>Make one from a good question.</strong> If you asked something useful in chat, save it as a recipe with its scope and model so next week is one keystroke.</p>
+      <p>
+        <strong>Make one from a good question.</strong> If you asked something
+        useful in chat, save it as a recipe with its scope and model so next
+        week is one keystroke.
+      </p>
     </div>
   </div>`;
 }
@@ -2406,19 +2939,28 @@ function trashView(): Html {
     <header class="page-head">
       <div class="eyebrow">Deleted notes</div>
       <h1>Trash</h1>
-      <p class="lede">${notes.length === 0 ? 'Nothing here. Deleted notes rest here until you empty them.' : `${notes.length} ${notes.length === 1 ? 'note' : 'notes'} waiting. Restore them from the list, or remove them for good.`}</p>
+      <p class="lede">
+        ${notes.length === 0 ? 'Nothing here. Deleted notes rest here until you empty them.' : `${notes.length} ${notes.length === 1 ? 'note' : 'notes'} waiting. Restore them from the list, or remove them for good.`}
+      </p>
       ${
         notes.length > 0
           ? html`<div class="page-actions">
-            <button class="danger-btn" data-act="empty-trash">${icon('trash', 14)} Empty trash</button>
-          </div>`
+              <button class="danger-btn" data-act="empty-trash">
+                ${icon('trash', 14)} Empty trash
+              </button>
+            </div>`
           : ''
       }
     </header>
     <div class="blank-state">
       ${icon('trash', 26)}
-      <h2>${notes.length === 0 ? 'Trash is empty.' : 'Nothing is gone for good yet.'}</h2>
-      <p>Notes in trash are excluded from search, chat, sharing and the People directory.</p>
+      <h2>
+        ${notes.length === 0 ? 'Trash is empty.' : 'Nothing is gone for good yet.'}
+      </h2>
+      <p>
+        Notes in trash are excluded from search, chat, sharing and the People
+        directory.
+      </p>
     </div>
   </div>`;
 }
@@ -2431,10 +2973,12 @@ async function removeAiKey(): Promise<void> {
   try {
     ui.ai = await window.api.setAiConfig({
       baseUrl: ui.ai.baseUrl,
+      sttServerUrl: ui.ai.sttServerUrl,
       chatModel: ui.ai.chatModel,
       thinkingModel: ui.ai.thinkingModel,
       sttModel: ui.ai.sttModel,
       sttLanguage: ui.db.settings.sttLanguage,
+      sttSource: ui.ai.sttSource,
       apiKey: '',
     });
     toast('API key removed.');
@@ -2444,13 +2988,90 @@ async function removeAiKey(): Promise<void> {
   }
 }
 
+function localModelReady(source: SttSource): boolean {
+  return ui.ai.localModels.some((entry) => entry.id === source && entry.ready);
+}
+
+function currentSttSource(): SttSource {
+  const select =
+    document.querySelector<HTMLSelectElement>('[name="sttSource"]');
+  return (select?.value as SttSource) ?? ui.ai.sttSource;
+}
+
+function sttLocalStatus(): string {
+  if (ui.sttDownload)
+    return `Downloading ${ui.sttDownload.file} — ${ui.sttDownload.percent}%`;
+  const source = currentSttSource();
+  if (source === 'cloud' || source === 'local-server') return '';
+  const model = LOCAL_STT_MODELS[source];
+  const large = source === 'whisper-large-v3-turbo';
+  if (localModelReady(source)) {
+    return large
+      ? `${model.label} is on this computer. Most accurate, but slower than small; use a GPU server if live notes lag.`
+      : `${model.label} is on this computer. Audio never leaves it.`;
+  }
+  return large
+    ? `${model.label} · about ${(model.sizeMb / 1000).toFixed(1)} GB. Most accurate, but ~3× slower than small on a CPU. Download once; it stays on this device.`
+    : `${model.label} · about ${(model.sizeMb / 1000).toFixed(1)} GB. Fast enough for live notes on a CPU. Download once; it stays on this device.`;
+}
+
+function updateSttSettings(): void {
+  const source = currentSttSource();
+  const local = source !== 'cloud' && source !== 'local-server';
+  const server = source === 'local-server';
+  const cloud = document.getElementById('stt-cloud');
+  const localBlock = document.getElementById('stt-local');
+  const serverBlock = document.getElementById('stt-server');
+  const serverUrl = document.getElementById('stt-server-url');
+  if (cloud) cloud.style.display = source === 'cloud' ? '' : 'none';
+  if (localBlock) localBlock.style.display = local ? '' : 'none';
+  if (serverBlock) serverBlock.style.display = server ? '' : 'none';
+  if (serverUrl) serverUrl.style.display = server ? '' : 'none';
+  const status = document.getElementById('stt-local-status');
+  if (status) status.textContent = sttLocalStatus();
+  const button = document.querySelector<HTMLButtonElement>('#stt-download');
+  const ready = localModelReady(currentSttSource());
+  if (button) {
+    button.disabled = ui.sttDownload !== null || ready;
+    button.textContent = ui.sttDownload
+      ? 'Downloading…'
+      : ready
+        ? 'Downloaded'
+        : 'Download model';
+  }
+}
+
+async function downloadSttModel(): Promise<void> {
+  if (ui.sttDownload) return;
+  const source = currentSttSource();
+  if (source === 'cloud' || source === 'local-server') return;
+  ui.sttDownload = { file: LOCAL_STT_MODELS[source].label, percent: 0 };
+  updateSttSettings();
+  try {
+    ui.ai = await window.api.sttDownload(source);
+    toast('Whisper is ready. Save settings to use it.');
+  } catch (error) {
+    console.error(error);
+    toast(
+      error instanceof Error
+        ? error.message
+        : 'The model could not be downloaded.',
+    );
+  } finally {
+    ui.sttDownload = null;
+    updateSttSettings();
+  }
+}
+
 function settingsView(): Html {
-  const plan = ui.db.workspace.plan;
   return html`<div class="page settings-page">
     <header class="page-head">
-      <div class="eyebrow">Workspace</div>
+      <div class="eyebrow">Personal</div>
       <h1>Settings</h1>
-      <p class="lede">Lilt stays useful without a model key, but a key unlocks real note enhancement and chat.</p>
+      <p class="lede">
+        No account, no plans. Lilt stays useful without a model key, but a key
+        unlocks real note enhancement and chat.
+      </p>
     </header>
 
     <form data-form="settings" class="settings-form">
@@ -2462,29 +3083,136 @@ function settingsView(): Html {
             ${ui.ai.configured ? 'Model connected' : 'Offline extract'}
           </span>
         </div>
-        <p class="settings-desc">Any OpenAI-compatible endpoint works. A local Whisper server on this machine (speaches, whisper.cpp, LocalAI) needs no API key. Audio chunks go to your speech-to-text provider and are never written to disk by Lilt.</p>
+        <p class="settings-desc">
+          Chat uses any OpenAI-compatible endpoint. Speech-to-text can run in
+          the cloud, in a local GPU server, or on this computer with Whisper. A
+          local model needs no key and audio never leaves the machine.
+        </p>
+        <label class="field">
+          <span>Speech-to-text</span>
+          <select name="sttSource" data-change="stt-source">
+            <option
+              value="cloud"
+              ${ui.ai.sttSource === 'cloud' ? raw('selected') : ''}
+            >
+              Cloud · OpenAI-compatible API
+            </option>
+            <option
+              value="local-server"
+              ${ui.ai.sttSource === 'local-server' ? raw('selected') : ''}
+            >
+              Local server · GPU Whisper
+            </option>
+            ${Object.entries(LOCAL_STT_MODELS).map(
+              ([value, model]) =>
+                html`<option
+                  value="${value}"
+                  ${ui.ai.sttSource === value ? raw('selected') : ''}
+                >
+                  On this computer · ${model.label} ·
+                  ${(model.sizeMb / 1000).toFixed(1)} GB
+                </option>`,
+            )}
+          </select>
+        </label>
+        <div
+          id="stt-local"
+          class="settings-inline"
+          style="${
+            ui.ai.sttSource === 'cloud' || ui.ai.sttSource === 'local-server'
+              ? 'display:none'
+              : ''
+          }"
+        >
+          <span class="small-note" id="stt-local-status"
+            >${sttLocalStatus()}</span
+          >
+          <button
+            type="button"
+            class="ghost-btn small"
+            data-act="download-stt"
+            id="stt-download"
+            ${localModelReady(ui.ai.sttSource) ? raw('disabled') : ''}
+          >
+            ${localModelReady(ui.ai.sttSource) ? 'Downloaded' : 'Download model'}
+          </button>
+        </div>
+        <p
+          class="small-note"
+          id="stt-cloud"
+          style="${ui.ai.sttSource === 'cloud' ? '' : 'display:none'}"
+        >
+          Cloud transcription posts 7-second chunks, cut down to the speech in
+          each one, to the endpoint below with the speech model.
+        </p>
+        <p
+          class="small-note"
+          id="stt-server"
+          style="${ui.ai.sttSource === 'local-server' ? '' : 'display:none'}"
+        >
+          Run a GPU build of whisper-server or an OpenAI-compatible server such
+          as speaches, then point this URL at it. No key is needed.
+          whisper-server loads its own model; speaches needs the speech model
+          field set to its model id.
+        </p>
+        <label
+          class="field"
+          id="stt-server-url"
+          style="${ui.ai.sttSource === 'local-server' ? '' : 'display:none'}"
+        >
+          <span>Whisper server URL</span>
+          <input
+            name="sttServerUrl"
+            value="${ui.ai.sttServerUrl}"
+            placeholder="http://127.0.0.1:8080"
+            spellcheck="false"
+          />
+        </label>
         <div class="field-grid two">
           <label class="field">
             <span>Base URL</span>
-            <input name="baseUrl" value="${ui.ai.baseUrl}" placeholder="https://api.openai.com/v1" spellcheck="false" />
+            <input
+              name="baseUrl"
+              value="${ui.ai.baseUrl}"
+              placeholder="https://api.openai.com/v1"
+              spellcheck="false"
+            />
           </label>
           <label class="field">
             <span>API key</span>
-            <input name="apiKey" type="password" placeholder="${ui.ai.configured ? 'Saved — leave blank to keep' : 'sk-…'}" autocomplete="off" spellcheck="false" />
+            <input
+              name="apiKey"
+              type="password"
+              placeholder="${ui.ai.configured ? 'Saved — leave blank to keep' : 'sk-…'}"
+              autocomplete="off"
+              spellcheck="false"
+            />
           </label>
         </div>
         <div class="field-grid three">
           <label class="field">
             <span>Chat model</span>
-            <input name="chatModel" value="${ui.ai.chatModel}" spellcheck="false" />
+            <input
+              name="chatModel"
+              value="${ui.ai.chatModel}"
+              spellcheck="false"
+            />
           </label>
           <label class="field">
             <span>Thinking model</span>
-            <input name="thinkingModel" value="${ui.ai.thinkingModel}" spellcheck="false" />
+            <input
+              name="thinkingModel"
+              value="${ui.ai.thinkingModel}"
+              spellcheck="false"
+            />
           </label>
           <label class="field">
             <span>Speech model</span>
-            <input name="sttModel" value="${ui.ai.sttModel}" spellcheck="false" />
+            <input
+              name="sttModel"
+              value="${ui.ai.sttModel}"
+              spellcheck="false"
+            />
           </label>
         </div>
         <div class="settings-inline">
@@ -2500,7 +3228,11 @@ function settingsView(): Html {
           ${
             ui.ai.configured
               ? html`
-                  <button type="button" class="text-btn danger-text" data-act="remove-key">
+                  <button
+                    type="button"
+                    class="text-btn danger-text"
+                    data-act="remove-key"
+                  >
                     Remove key
                   </button>
                 `
@@ -2525,7 +3257,12 @@ function settingsView(): Html {
                 ['pt', 'Portuguese'],
               ].map(
                 ([value, label]) =>
-                  html`<option value="${value}" ${ui.db.settings.sttLanguage === value ? raw('selected') : ''}>${label}</option>`,
+                  html`<option
+                    value="${value}"
+                    ${ui.db.settings.sttLanguage === value ? raw('selected') : ''}
+                  >
+                    ${label}
+                  </option>`,
               )}
             </select>
           </label>
@@ -2536,46 +3273,47 @@ function settingsView(): Html {
         </div>
         <div class="toggle-list">
           <label class="toggle">
-            <input type="checkbox" name="includeSystemAudio" ${ui.db.settings.includeSystemAudio ? raw('checked') : ''} />
-            <span><strong>Capture system audio by default</strong><small>Shared system audio is transcribed as “Them”. You can change this on every start.</small></span>
+            <input
+              type="checkbox"
+              name="includeSystemAudio"
+              ${ui.db.settings.includeSystemAudio ? raw('checked') : ''}
+            />
+            <span
+              ><strong>Capture system audio by default</strong
+              ><small
+                >Shared system audio is transcribed as “Them”. You can change
+                this on every start.</small
+              ></span
+            >
           </label>
           <label class="toggle">
-            <input type="checkbox" name="autoEnhance" ${ui.db.settings.autoEnhance ? raw('checked') : ''} />
-            <span><strong>Enhance notes after each meeting</strong><small>Runs after recording stops if there is a transcript or raw notes.</small></span>
+            <input
+              type="checkbox"
+              name="autoEnhance"
+              ${ui.db.settings.autoEnhance ? raw('checked') : ''}
+            />
+            <span
+              ><strong>Enhance notes after each meeting</strong
+              ><small
+                >Runs after recording stops if there is a transcript or raw
+                notes.</small
+              ></span
+            >
           </label>
           <label class="toggle">
-            <input type="checkbox" name="notifications" ${ui.db.settings.notifications ? raw('checked') : ''} />
-            <span><strong>In-app reminders</strong><small>One minute before a synced meeting with 2+ attendees. Clicking joins the call and starts the note.</small></span>
+            <input
+              type="checkbox"
+              name="notifications"
+              ${ui.db.settings.notifications ? raw('checked') : ''}
+            />
+            <span
+              ><strong>In-app reminders</strong
+              ><small
+                >One minute before a synced meeting with 2+ attendees. Clicking
+                joins the call and starts the note.</small
+              ></span
+            >
           </label>
-        </div>
-      </section>
-
-      <section class="settings-section">
-        <div class="settings-head"><h2>Plan</h2><span class="small-note">Clone the boundary, not the price</span></div>
-        <div class="plan-grid">
-          ${(['free', 'business', 'enterprise'] as Plan[]).map((option) => {
-            const copy =
-              option === 'free'
-                ? `Unlimited notes, ${ui.db.settings.historyDays}-day history, Auto chat model.`
-                : option === 'business'
-                  ? 'Full history, model choice, briefs, follow-ups, integrations.'
-                  : 'SSO, audit, retention, admin controls, advanced integrations.';
-            return html`<label class="plan-option ${plan === option ? 'active' : ''}">
-              <input type="radio" name="plan" value="${option}" ${plan === option ? raw('checked') : ''} />
-              <strong>${planName(option)}</strong>
-              <span>${copy}</span>
-            </label>`;
-          })}
-        </div>
-        <div class="field-grid two">
-          <label class="field">
-            <span>History window (days)</span>
-            <input type="number" name="historyDays" min="1" max="3650" value="${ui.db.settings.historyDays}" />
-          </label>
-          <div class="field">
-            <span>Plan behavior</span>
-            <p class="field-note">Free hides notes older than the window from the library, search and chat. Nothing is deleted. Switching to a paid plan brings them back instantly.</p>
-          </div>
         </div>
       </section>
 
@@ -2593,84 +3331,159 @@ function settingsView(): Html {
           ${ui.calendar.status.connected ? (ui.calendar.status.provider === 'microsoft' ? 'Outlook' : 'Google Calendar') : 'Not connected'}
         </span>
       </div>
-      <p class="settings-desc">Read-only, next 14 days. Connecting also sets your name and email from the account. The refresh token is encrypted by the OS keychain, never enters the note database, and can be removed at any time.</p>
+      <p class="settings-desc">
+        Read-only, next 14 days. Connecting also sets your name and email from
+        the account. The refresh token is encrypted by the OS keychain, never
+        enters the note database, and can be removed at any time.
+      </p>
       ${
         ui.calendar.status.connected
           ? html`<div class="calendar-account">
-            <div class="calendar-account-copy">
-              <strong>${ui.calendar.status.name || ui.calendar.status.email || 'Calendar connected'}</strong>
-              <span>${ui.calendar.status.email}</span>
-              <span>${ui.calendar.status.lastSyncedAt ? `Last sync ${relativeDate(ui.calendar.status.lastSyncedAt)}` : 'Not synced yet'}</span>
-            </div>
-            <div class="data-actions">
-              <button type="button" class="ghost-btn" data-act="calendar-sync">${icon('refresh', 13)} ${ui.calendar.syncing ? 'Syncing…' : 'Sync now'}</button>
-              <button type="button" class="ghost-btn danger-outline" data-act="calendar-disconnect">${icon('x', 13)} Disconnect</button>
-            </div>
-          </div>
-          ${ui.calendar.status.error ? html`<p class="field-note calendar-error">${ui.calendar.status.error}</p>` : ''}`
+                <div class="calendar-account-copy">
+                  <strong
+                    >${ui.calendar.status.name || ui.calendar.status.email || 'Calendar connected'}</strong
+                  >
+                  <span>${ui.calendar.status.email}</span>
+                  <span
+                    >${ui.calendar.status.lastSyncedAt ? `Last sync ${relativeDate(ui.calendar.status.lastSyncedAt)}` : 'Not synced yet'}</span
+                  >
+                </div>
+                <div class="data-actions">
+                  <button
+                    type="button"
+                    class="ghost-btn"
+                    data-act="calendar-sync"
+                  >
+                    ${icon('refresh', 13)}
+                    ${ui.calendar.syncing ? 'Syncing…' : 'Sync now'}
+                  </button>
+                  <button
+                    type="button"
+                    class="ghost-btn danger-outline"
+                    data-act="calendar-disconnect"
+                  >
+                    ${icon('x', 13)} Disconnect
+                  </button>
+                </div>
+              </div>
+              ${ui.calendar.status.error ? html`<p class="field-note calendar-error">${ui.calendar.status.error}</p>` : ''}`
           : html`<div class="calendar-connect">
-            <div class="field-grid two">
+              <div class="field-grid two">
+                <label class="field">
+                  <span>Provider</span>
+                  <select id="cal-provider">
+                    <option value="google">Google Calendar</option>
+                    <option value="microsoft">Microsoft Outlook</option>
+                  </select>
+                </label>
+                <label class="field">
+                  <span>OAuth client ID</span>
+                  <input
+                    id="cal-client-id"
+                    placeholder="…apps.googleusercontent.com"
+                    autocomplete="off"
+                    spellcheck="false"
+                  />
+                </label>
+              </div>
               <label class="field">
-                <span>Provider</span>
-                <select id="cal-provider">
-                  <option value="google">Google Calendar</option>
-                  <option value="microsoft">Microsoft Outlook</option>
-                </select>
+                <span>Client secret (Google only)</span>
+                <input
+                  id="cal-client-secret"
+                  type="password"
+                  autocomplete="off"
+                  spellcheck="false"
+                />
               </label>
-              <label class="field">
-                <span>OAuth client ID</span>
-                <input id="cal-client-id" placeholder="…apps.googleusercontent.com" autocomplete="off" spellcheck="false" />
-              </label>
-            </div>
-            <label class="field">
-              <span>Client secret (Google only)</span>
-              <input id="cal-client-secret" type="password" autocomplete="off" spellcheck="false" />
-            </label>
-            <p class="field-note">Create a <strong>Desktop app</strong> OAuth client in Google Cloud Console (no redirect to register) or a Microsoft Entra app with public client flows and redirect <code>http://localhost/oauth/callback</code>. Sign-in opens in your browser.</p>
-            <button type="button" class="primary-btn" data-act="calendar-connect">${icon('calendar', 13)} Connect calendar</button>
-          </div>`
+              <p class="field-note">
+                Create a <strong>Desktop app</strong> OAuth client in Google
+                Cloud Console (no redirect to register) or a Microsoft Entra app
+                with public client flows and redirect
+                <code>http://localhost/oauth/callback</code>. Sign-in opens in
+                your browser.
+              </p>
+              <button
+                type="button"
+                class="primary-btn"
+                data-act="calendar-connect"
+              >
+                ${icon('calendar', 13)} Connect calendar
+              </button>
+            </div>`
       }
     </section>
 
     <section class="settings-section">
       <div class="settings-head">
         <h2>Templates</h2>
-        <button type="button" class="ghost-btn small" data-act="new-template">${icon('plus', 13)} New template</button>
+        <button type="button" class="ghost-btn small" data-act="new-template">
+          ${icon('plus', 13)} New template
+        </button>
       </div>
-      <p class="settings-desc">Templates decide the sections of the enhanced note. Built-ins cover common meetings; custom templates are private unless you share them with the workspace.</p>
+      <p class="settings-desc">
+        Templates decide the sections of the enhanced note. Built-ins cover
+        common meetings; your own templates sit beside them in every note.
+      </p>
       <div class="template-list">
         ${ui.db.templates.map(
-          (template) => html`<div class="template-row">
-            <div>
-              <strong>${template.name}</strong>
-              <span>${template.sections.join(' · ')}</span>
-            </div>
-            <span class="template-visibility">${template.builtin ? 'Built-in' : template.visibility === 'org' ? 'Workspace' : 'Private'}</span>
-            ${
-              template.builtin
-                ? ''
-                : html`<button type="button" class="tiny-btn danger" data-act="delete-template" data-id="${template.id}" title="Delete template">${icon('trash', 12)}</button>`
-            }
-          </div>`,
+          (template) =>
+            html`<div class="template-row">
+              <div>
+                <strong>${template.name}</strong>
+                <span>${template.sections.join(' · ')}</span>
+              </div>
+              <span class="template-visibility"
+                >${template.builtin ? 'Built-in' : 'Yours'}</span
+              >
+              ${
+                template.builtin
+                  ? ''
+                  : html`<button
+                      type="button"
+                      class="tiny-btn danger"
+                      data-act="delete-template"
+                      data-id="${template.id}"
+                      title="Delete template"
+                    >
+                      ${icon('trash', 12)}
+                    </button>`
+              }
+            </div>`,
         )}
       </div>
     </section>
 
     <section class="settings-section">
-      <div class="settings-head"><h2>Data</h2><span class="small-note">Local-first</span></div>
-      <p class="settings-desc">Notes, transcripts and settings live in a single local file in the app's user data folder. Audio is never part of it.</p>
+      <div class="settings-head">
+        <h2>Data</h2>
+        <span class="small-note">Local-first</span>
+      </div>
+      <p class="settings-desc">
+        Notes, transcripts and settings live in a single local file in the app's
+        user data folder. Audio is never part of it.
+      </p>
       <div class="data-actions">
-        <button class="ghost-btn" data-act="export-all">${icon('download', 13)} Export all notes as CSV</button>
-        <button class="ghost-btn danger-outline" data-act="reset-demo">${icon('refresh', 13)} Reset to demo data</button>
-        <button class="ghost-btn danger-outline" data-act="delete-all">${icon('trash', 13)} Delete all notes</button>
+        <button class="ghost-btn" data-act="export-all">
+          ${icon('download', 13)} Export all notes as CSV
+        </button>
+        <button class="ghost-btn danger-outline" data-act="reset-demo">
+          ${icon('refresh', 13)} Reset to demo data
+        </button>
+        <button class="ghost-btn danger-outline" data-act="delete-all">
+          ${icon('trash', 13)} Delete all notes
+        </button>
       </div>
     </section>
 
     <section class="settings-section about">
       <div class="settings-head"><h2>About this build</h2></div>
-      <p class="settings-desc">A bot-free meeting notepad. Capture is manual. “Me” is your microphone, “Them” is system audio. Transcripts never appear in shared links. Mobile capture, SSO, MCP and enterprise retention are intentionally out of this build.</p>
+      <p class="settings-desc">
+        A bot-free meeting notepad that belongs to you: no account, no plans, no
+        feature gates. Capture is manual. “Me” is your microphone, “Them” is
+        system audio. Transcripts never appear in shared links.
+      </p>
       <div class="about-meta">
-        <span>${brandMark(18)} Lilt 1.0 · local prototype</span>
+        <span>${brandMark(18)} Lilt 1.0 · personal build</span>
         <span>${ui.db.notes.length} notes · ${ui.db.workspace.name}</span>
       </div>
     </section>
@@ -2709,36 +3522,52 @@ function chatPane(): Html {
         </div>
       </div>
       <div class="chat-head-actions">
-        <button class="tiny-btn" data-act="new-thread" title="New conversation">${icon('plus', 14)}</button>
-        <button class="tiny-btn" data-act="close-chat" title="Close">${icon('x', 14)}</button>
+        <button class="tiny-btn" data-act="new-thread" title="New conversation">
+          ${icon('plus', 14)}
+        </button>
+        <button class="tiny-btn" data-act="close-chat" title="Close">
+          ${icon('x', 14)}
+        </button>
       </div>
     </header>
     <div class="chat-log" id="chat-log">
       ${
         messages.length === 0
           ? html`<div class="chat-empty">
-            <div class="chat-empty-icon">${icon('chat', 20)}</div>
-            <h3>${scope.type === 'note' ? 'Ask about this meeting' : scope.type === 'person' ? `Ask about ${scope.label}` : 'Ask across your meetings'}</h3>
-            <p>${ui.ai.configured ? 'Answers use only the notes in scope. Cite a meeting by name and check the source.' : 'No model key, so answers are extracted directly from the notes in scope.'}</p>
-            <div class="suggestions">
-              ${suggestions.map(
-                (
-                  suggestion,
-                ) => html`<button class="suggestion" data-act="chat-suggest" data-text="${suggestion}">
-                  ${suggestion} ${icon('arrowRight', 11)}
-                </button>`,
-              )}
-            </div>
-            <span class="chat-private">${icon('lock', 10)} Threads are private to you, even when notes are shared.</span>
-          </div>`
+              <div class="chat-empty-icon">${icon('chat', 20)}</div>
+              <h3>
+                ${scope.type === 'note' ? 'Ask about this meeting' : scope.type === 'person' ? `Ask about ${scope.label}` : 'Ask across your meetings'}
+              </h3>
+              <p>
+                ${ui.ai.configured ? 'Answers use only the notes in scope. Cite a meeting by name and check the source.' : 'No model key, so answers are extracted directly from the notes in scope.'}
+              </p>
+              <div class="suggestions">
+                ${suggestions.map(
+                  (suggestion) =>
+                    html`<button
+                      class="suggestion"
+                      data-act="chat-suggest"
+                      data-text="${suggestion}"
+                    >
+                      ${suggestion} ${icon('arrowRight', 11)}
+                    </button>`,
+                )}
+              </div>
+              <span class="chat-private"
+                >${icon('lock', 10)} Threads are private to you, even when notes
+                are shared.</span
+              >
+            </div>`
           : messages.map((message) => chatMessage(message))
       }
       ${
         ui.chatBusy
           ? html`<div class="chat-msg assistant">
-            <div class="chat-avatar">${icon('sparkle', 12)}</div>
-            <div class="chat-bubble typing"><i></i><i></i><i></i><span>Reading your notes…</span></div>
-          </div>`
+              <div class="chat-avatar">${icon('sparkle', 12)}</div>
+              <div class="chat-bubble typing">
+                <i></i><i></i><i></i><span>Reading your notes…</span>
+              </div>
+            </div>`
           : ''
       }
     </div>
@@ -2749,15 +3578,42 @@ function chatPane(): Html {
         data-input="chat"
         rows="1"
         placeholder="Ask anything, or type / for a recipe"
-      >${ui.chatDraft}</textarea>
+      >
+${ui.chatDraft}</textarea>
       <div class="compose-row">
-        <select class="model-select" data-change="chat-model" aria-label="Model">
-          <option value="auto" ${ui.chatModel === 'auto' ? raw('selected') : ''}>Auto</option>
-          <option value="standard" ${ui.chatModel === 'standard' ? raw('selected') : ''} ${isFree() ? raw('disabled') : ''}>Standard</option>
-          <option value="thinking" ${ui.chatModel === 'thinking' ? raw('selected') : ''} ${isFree() ? raw('disabled') : ''}>Thinking</option>
+        <select
+          class="model-select"
+          data-change="chat-model"
+          aria-label="Model"
+        >
+          <option
+            value="auto"
+            ${ui.chatModel === 'auto' ? raw('selected') : ''}
+          >
+            Auto
+          </option>
+          <option
+            value="standard"
+            ${ui.chatModel === 'standard' ? raw('selected') : ''}
+          >
+            Standard
+          </option>
+          <option
+            value="thinking"
+            ${ui.chatModel === 'thinking' ? raw('selected') : ''}
+          >
+            Thinking
+          </option>
         </select>
-        <span class="compose-hint">${ui.ai.configured ? (isFree() ? 'Free · Auto model' : 'Choose a model per thread') : 'Local extract'}</span>
-        <button class="send-btn" data-act="chat-send" ${!ui.chatDraft.trim() || ui.chatBusy ? raw('disabled') : ''} title="Send">
+        <span class="compose-hint"
+          >${ui.ai.configured ? 'Choose a model per thread' : 'Local extract'}</span
+        >
+        <button
+          class="send-btn"
+          data-act="chat-send"
+          ${!ui.chatDraft.trim() || ui.chatBusy ? raw('disabled') : ''}
+          title="Send"
+        >
           ${icon('send', 14)}
         </button>
       </div>
@@ -2790,7 +3646,9 @@ function chatRecipeMenu(): Html {
       recipe.prompt.toLowerCase().includes(query),
   );
   return html`<div class="recipe-menu">
-    <div class="recipe-menu-head">Recipes <span>${ui.db.recipes.length}</span></div>
+    <div class="recipe-menu-head">
+      Recipes <span>${ui.db.recipes.length}</span>
+    </div>
     ${
       recipes.length === 0
         ? html`
@@ -2800,13 +3658,18 @@ function chatRecipeMenu(): Html {
             </div>
           `
         : recipes.map(
-            (
-              recipe,
-            ) => html`<button class="recipe-item" data-act="pick-recipe" data-id="${recipe.id}">
-            ${icon('recipe', 12)}
-            <span>${recipe.name}</span>
-            <small>${recipe.scope === 'single' ? 'one meeting' : 'multiple'}</small>
-          </button>`,
+            (recipe) =>
+              html`<button
+                class="recipe-item"
+                data-act="pick-recipe"
+                data-id="${recipe.id}"
+              >
+                ${icon('recipe', 12)}
+                <span>${recipe.name}</span>
+                <small
+                  >${recipe.scope === 'single' ? 'one meeting' : 'multiple'}</small
+                >
+              </button>`,
           )
     }
   </div>`;
@@ -2824,16 +3687,93 @@ function renderChatMenu(): void {
 function modalView(): Html {
   const modal = ui.modal;
   if (!modal) return html``;
+  if (modal.type === 'space') {
+    const space = modal.spaceId ? spaceById(modal.spaceId) : null;
+    const locked = space?.kind === 'personal';
+    return html`<div class="modal-backdrop" data-act="modal-backdrop">
+      <div
+        class="modal"
+        role="dialog"
+        aria-modal="true"
+        aria-label="${space ? 'Edit space' : 'New space'}"
+      >
+        <header class="modal-head">
+          <div>
+            <span class="eyebrow">Spaces</span>
+            <h2>${space ? 'Edit space' : 'New space'}</h2>
+          </div>
+          <button class="tiny-btn" data-act="modal-close" title="Close">
+            ${icon('x', 15)}
+          </button>
+        </header>
+        <form data-form="space">
+          <label class="field">
+            <span>Name</span>
+            <input
+              name="name"
+              value="${space?.name ?? ''}"
+              placeholder="Client work"
+              autofocus
+              required
+            />
+          </label>
+          <label class="field">
+            <span>Description <small>optional</small></span>
+            <textarea
+              name="description"
+              rows="2"
+              placeholder="What belongs here?"
+            >
+${space?.description ?? ''}</textarea>
+          </label>
+          <div class="modal-foot">
+            ${
+              space && !locked
+                ? html`<button
+                    type="button"
+                    class="ghost-btn danger-outline push-left"
+                    data-act="delete-space"
+                    data-id="${space.id}"
+                  >
+                    ${icon('trash', 13)} Delete
+                  </button>`
+                : ''
+            }
+            <button type="button" class="ghost-btn" data-act="modal-close">
+              Cancel
+            </button>
+            <button type="submit" class="primary-btn">
+              ${space ? 'Save space' : 'Create space'}
+            </button>
+          </div>
+        </form>
+      </div>
+    </div>`;
+  }
   if (modal.type === 'folder') {
     const space = spaceById(modal.spaceId);
-    const parents = ui.db.folders.filter(
-      (folder) => folder.spaceId === modal.spaceId && !folder.parentId,
-    );
+    const parents = ui.db.folders
+      .filter((folder) => folder.spaceId === modal.spaceId)
+      .sort((a, b) =>
+        folderPath(ui.db.folders, a.id).localeCompare(
+          folderPath(ui.db.folders, b.id),
+        ),
+      );
     return html`<div class="modal-backdrop" data-act="modal-backdrop">
-      <div class="modal" role="dialog" aria-modal="true" aria-label="New folder">
+      <div
+        class="modal"
+        role="dialog"
+        aria-modal="true"
+        aria-label="New folder"
+      >
         <header class="modal-head">
-          <div><span class="eyebrow">${space?.name ?? 'Space'}</span><h2>New folder</h2></div>
-          <button class="tiny-btn" data-act="modal-close" title="Close">${icon('x', 15)}</button>
+          <div>
+            <span class="eyebrow">${space?.name ?? 'Space'}</span>
+            <h2>New folder</h2>
+          </div>
+          <button class="tiny-btn" data-act="modal-close" title="Close">
+            ${icon('x', 15)}
+          </button>
         </header>
         <form data-form="folder">
           <label class="field">
@@ -2842,21 +3782,35 @@ function modalView(): Html {
           </label>
           <label class="field">
             <span>Description <small>optional</small></span>
-            <textarea name="description" rows="2" placeholder="What belongs here? Chat uses this to focus."></textarea>
+            <textarea
+              name="description"
+              rows="2"
+              placeholder="What belongs here? Chat uses this to focus."
+            ></textarea>
           </label>
           ${
             parents.length
               ? html`<label class="field">
-                <span>Nest inside <small>one level</small></span>
-                <select name="parentId">
-                  <option value="">Top level</option>
-                  ${parents.map((folder) => html`<option value="${folder.id}">${folder.name}</option>`)}
-                </select>
-              </label>`
+                  <span>Nest inside</span>
+                  <select name="parentId">
+                    <option value="">Top level</option>
+                    ${parents.map(
+                      (folder) =>
+                        html`<option
+                          value="${folder.id}"
+                          ${modal.parentId === folder.id ? raw('selected') : ''}
+                        >
+                          ${folderPath(ui.db.folders, folder.id)}
+                        </option>`,
+                    )}
+                  </select>
+                </label>`
               : ''
           }
           <div class="modal-foot">
-            <button type="button" class="ghost-btn" data-act="modal-close">Cancel</button>
+            <button type="button" class="ghost-btn" data-act="modal-close">
+              Cancel
+            </button>
             <button type="submit" class="primary-btn">Create folder</button>
           </div>
         </form>
@@ -2865,33 +3819,51 @@ function modalView(): Html {
   }
   if (modal.type === 'template') {
     return html`<div class="modal-backdrop" data-act="modal-backdrop">
-      <div class="modal" role="dialog" aria-modal="true" aria-label="New template">
+      <div
+        class="modal"
+        role="dialog"
+        aria-modal="true"
+        aria-label="New template"
+      >
         <header class="modal-head">
-          <div><span class="eyebrow">Note shaping</span><h2>New template</h2></div>
-          <button class="tiny-btn" data-act="modal-close" title="Close">${icon('x', 15)}</button>
+          <div>
+            <span class="eyebrow">Note shaping</span>
+            <h2>New template</h2>
+          </div>
+          <button class="tiny-btn" data-act="modal-close" title="Close">
+            ${icon('x', 15)}
+          </button>
         </header>
         <form data-form="template">
           <label class="field">
             <span>Name</span>
-            <input name="name" placeholder="Customer discovery" autofocus required />
+            <input
+              name="name"
+              placeholder="Customer discovery"
+              autofocus
+              required
+            />
           </label>
           <label class="field">
             <span>Purpose</span>
-            <textarea name="prompt" rows="3" placeholder="What should this template capture? What should it never invent?"></textarea>
+            <textarea
+              name="prompt"
+              rows="3"
+              placeholder="What should this template capture? What should it never invent?"
+            ></textarea>
           </label>
           <label class="field">
             <span>Sections <small>one per line</small></span>
-            <textarea name="sections" rows="4" placeholder="Context&#10;What they said&#10;Risks&#10;Next steps"></textarea>
-          </label>
-          <label class="field">
-            <span>Visibility</span>
-            <select name="visibility">
-              <option value="private">Private to me</option>
-              <option value="org">Everyone at ${ui.db.workspace.domain}</option>
-            </select>
+            <textarea
+              name="sections"
+              rows="4"
+              placeholder="Context&#10;What they said&#10;Risks&#10;Next steps"
+            ></textarea>
           </label>
           <div class="modal-foot">
-            <button type="button" class="ghost-btn" data-act="modal-close">Cancel</button>
+            <button type="button" class="ghost-btn" data-act="modal-close">
+              Cancel
+            </button>
             <button type="submit" class="primary-btn">Save template</button>
           </div>
         </form>
@@ -2900,19 +3872,39 @@ function modalView(): Html {
   }
   if (modal.type === 'recipe') {
     return html`<div class="modal-backdrop" data-act="modal-backdrop">
-      <div class="modal" role="dialog" aria-modal="true" aria-label="New recipe">
+      <div
+        class="modal"
+        role="dialog"
+        aria-modal="true"
+        aria-label="New recipe"
+      >
         <header class="modal-head">
-          <div><span class="eyebrow">Saved prompt</span><h2>New recipe</h2></div>
-          <button class="tiny-btn" data-act="modal-close" title="Close">${icon('x', 15)}</button>
+          <div>
+            <span class="eyebrow">Saved prompt</span>
+            <h2>New recipe</h2>
+          </div>
+          <button class="tiny-btn" data-act="modal-close" title="Close">
+            ${icon('x', 15)}
+          </button>
         </header>
         <form data-form="recipe">
           <label class="field">
             <span>Name</span>
-            <input name="name" placeholder="Objections & risks" autofocus required />
+            <input
+              name="name"
+              placeholder="Objections & risks"
+              autofocus
+              required
+            />
           </label>
           <label class="field">
             <span>Prompt</span>
-            <textarea name="prompt" rows="4" placeholder="List every objection, with who raised it and the exact wording." required></textarea>
+            <textarea
+              name="prompt"
+              rows="4"
+              placeholder="List every objection, with who raised it and the exact wording."
+              required
+            ></textarea>
           </label>
           <div class="field-grid two">
             <label class="field">
@@ -2931,15 +3923,10 @@ function modalView(): Html {
               </select>
             </label>
           </div>
-          <label class="field">
-            <span>Visibility</span>
-            <select name="visibility">
-              <option value="private">Private to me</option>
-              <option value="workspace">Workspace</option>
-            </select>
-          </label>
           <div class="modal-foot">
-            <button type="button" class="ghost-btn" data-act="modal-close">Cancel</button>
+            <button type="button" class="ghost-btn" data-act="modal-close">
+              Cancel
+            </button>
             <button type="submit" class="primary-btn">Save recipe</button>
           </div>
         </form>
@@ -2948,10 +3935,20 @@ function modalView(): Html {
   }
   if (modal.type === 'move') {
     return html`<div class="modal-backdrop" data-act="modal-backdrop">
-      <div class="modal" role="dialog" aria-modal="true" aria-label="Add to folder">
+      <div
+        class="modal"
+        role="dialog"
+        aria-modal="true"
+        aria-label="Add to folder"
+      >
         <header class="modal-head">
-          <div><span class="eyebrow">${ui.selected.size} selected</span><h2>Add to folder</h2></div>
-          <button class="tiny-btn" data-act="modal-close" title="Close">${icon('x', 15)}</button>
+          <div>
+            <span class="eyebrow">${ui.selected.size} selected</span>
+            <h2>Add to folder</h2>
+          </div>
+          <button class="tiny-btn" data-act="modal-close" title="Close">
+            ${icon('x', 15)}
+          </button>
         </header>
         <form data-form="move">
           <div class="folder-picker">
@@ -2963,17 +3960,24 @@ function modalView(): Html {
               return html`<div class="picker-group">
                 <span class="picker-space">${space.name}</span>
                 ${folders.map(
-                  (folder) => html`<label class="picker-row">
-                    <input type="checkbox" name="folders" value="${folder.id}" />
-                    ${icon(folderIcon(folder.icon), 13)}
-                    <span>${folderPath(ui.db.folders, folder.id)}</span>
-                  </label>`,
+                  (folder) =>
+                    html`<label class="picker-row">
+                      <input
+                        type="checkbox"
+                        name="folders"
+                        value="${folder.id}"
+                      />
+                      ${icon(folderIcon(folder.icon), 13)}
+                      <span>${folderPath(ui.db.folders, folder.id)}</span>
+                    </label>`,
                 )}
               </div>`;
             })}
           </div>
           <div class="modal-foot">
-            <button type="button" class="ghost-btn" data-act="modal-close">Cancel</button>
+            <button type="button" class="ghost-btn" data-act="modal-close">
+              Cancel
+            </button>
             <button type="submit" class="primary-btn">Add to folders</button>
           </div>
         </form>
@@ -2984,14 +3988,32 @@ function modalView(): Html {
     const note = noteById(modal.noteId);
     if (!note) return html``;
     return html`<div class="modal-backdrop" data-act="modal-backdrop">
-      <div class="modal wide" role="dialog" aria-modal="true" aria-label="Share note">
+      <div
+        class="modal wide"
+        role="dialog"
+        aria-modal="true"
+        aria-label="Share note"
+      >
         <header class="modal-head">
-          <div><span class="eyebrow">${note.title}</span><h2>Local preview</h2></div>
-          <button class="tiny-btn" data-act="modal-close" title="Close">${icon('x', 15)}</button>
+          <div>
+            <span class="eyebrow">${note.title}</span>
+            <h2>Local preview</h2>
+          </div>
+          <button class="tiny-btn" data-act="modal-close" title="Close">
+            ${icon('x', 15)}
+          </button>
         </header>
         <form data-form="share">
-          <p class="modal-lede">This link only opens on this computer. It shows the enhanced summary; raw notes and the transcript stay out. There is no sign-in, so treat it as a convenience link, not private access.</p>
-          <div class="inline-warning">${icon('globe', 13)}<span>Links use 127.0.0.1 and will not open on another computer.</span></div>
+          <p class="modal-lede">
+            This link only opens on this computer. It shows the enhanced
+            summary; raw notes and the transcript stay out. There is no sign-in,
+            so treat it as a convenience link, not private access.
+          </p>
+          <div class="inline-warning">
+            ${icon('globe', 13)}<span
+              >Links use 127.0.0.1 and will not open on another computer.</span
+            >
+          </div>
           <div class="share-options">
             ${[
               ['off', 'Off', 'No link is served.'],
@@ -3001,34 +4023,63 @@ function modalView(): Html {
                 'Anyone using this computer with the link can read the summary.',
               ],
             ].map(
-              ([
-                value,
-                label,
-                description,
-              ]) => html`<label class="share-option ${note.share.mode === value ? 'active' : ''}">
-                <input type="radio" name="mode" value="${value}" ${note.share.mode === value ? raw('checked') : ''} />
-                <span><strong>${label}</strong><small>${description}</small></span>
-              </label>`,
+              ([value, label, description]) =>
+                html`<label
+                  class="share-option ${note.share.mode === value ? 'active' : ''}"
+                >
+                  <input
+                    type="radio"
+                    name="mode"
+                    value="${value}"
+                    ${note.share.mode === value ? raw('checked') : ''}
+                  />
+                  <span
+                    ><strong>${label}</strong
+                    ><small>${description}</small></span
+                  >
+                </label>`,
             )}
           </div>
           ${
             !note.enhanced
-              ? html`<div class="inline-warning">${icon('zap', 13)}<span>There is no enhanced summary yet. The viewer will say the summary is still being written. Enhance the note first for a useful link.</span></div>`
+              ? html`<div class="inline-warning">
+                  ${icon('zap', 13)}<span
+                    >There is no enhanced summary yet. The viewer will say the
+                    summary is still being written. Enhance the note first for a
+                    useful link.</span
+                  >
+                </div>`
               : ''
           }
           ${
             modal.url
               ? html`<div class="share-url">
-                <span>${modal.url}</span>
-                <div>
-                  <button type="button" class="ghost-btn small" data-act="copy-share" data-url="${modal.url}">${icon('copy', 12)} Copy</button>
-                  <button type="button" class="ghost-btn small" data-act="open-share" data-url="${modal.url}">${icon('external', 12)} Open viewer</button>
-                </div>
-              </div>`
+                  <span>${modal.url}</span>
+                  <div>
+                    <button
+                      type="button"
+                      class="ghost-btn small"
+                      data-act="copy-share"
+                      data-url="${modal.url}"
+                    >
+                      ${icon('copy', 12)} Copy
+                    </button>
+                    <button
+                      type="button"
+                      class="ghost-btn small"
+                      data-act="open-share"
+                      data-url="${modal.url}"
+                    >
+                      ${icon('external', 12)} Open viewer
+                    </button>
+                  </div>
+                </div>`
               : ''
           }
           <div class="modal-foot">
-            <button type="button" class="ghost-btn" data-act="modal-close">Close</button>
+            <button type="button" class="ghost-btn" data-act="modal-close">
+              Close
+            </button>
             <button type="submit" class="primary-btn">Save preview</button>
           </div>
         </form>
@@ -3036,15 +4087,32 @@ function modalView(): Html {
     </div>`;
   }
   return html`<div class="modal-backdrop" data-act="modal-backdrop">
-    <div class="modal confirm" role="dialog" aria-modal="true" aria-label="${modal.title}">
+    <div
+      class="modal confirm"
+      role="dialog"
+      aria-modal="true"
+      aria-label="${modal.title}"
+    >
       <header class="modal-head">
-        <div><span class="eyebrow">Please confirm</span><h2>${modal.title}</h2></div>
-        <button class="tiny-btn" data-act="modal-close" title="Close">${icon('x', 15)}</button>
+        <div>
+          <span class="eyebrow">Please confirm</span>
+          <h2>${modal.title}</h2>
+        </div>
+        <button class="tiny-btn" data-act="modal-close" title="Close">
+          ${icon('x', 15)}
+        </button>
       </header>
       <p class="modal-lede">${modal.body}</p>
       <div class="modal-foot">
         <button class="ghost-btn" data-act="modal-close">Cancel</button>
-        <button class="danger-btn" data-act="confirm" data-id="${modal.id ?? ''}" data-action="${modal.action}">${modal.label}</button>
+        <button
+          class="danger-btn"
+          data-act="confirm"
+          data-id="${modal.id ?? ''}"
+          data-action="${modal.action}"
+        >
+          ${modal.label}
+        </button>
       </div>
     </div>
   </div>`;
@@ -3052,7 +4120,9 @@ function modalView(): Html {
 
 function toastView(): Html {
   if (!ui.toast) return html``;
-  return html`<div class="toast" role="status">${icon('check', 13)}<span>${ui.toast}</span></div>`;
+  return html`<div class="toast" role="status">
+    ${icon('check', 13)}<span>${ui.toast}</span>
+  </div>`;
 }
 
 // ---------------------------------------------------------------------------
@@ -3185,6 +4255,14 @@ function runConfirm(action: ConfirmAction, id?: string): void {
     toast('Template deleted.');
     return;
   }
+  if (action === 'delete-space' && id) {
+    deleteSpace(id);
+    return;
+  }
+  if (action === 'delete-folder' && id) {
+    deleteFolder(id);
+    return;
+  }
   if (action === 'delete-recipe' && id) {
     ui.db.recipes = ui.db.recipes.filter((entry) => entry.id !== id);
     persist();
@@ -3216,6 +4294,9 @@ function onClick(event: MouseEvent): void {
   switch (act) {
     case 'nav':
       navigate(actionEl.dataset.view ?? 'home', actionEl.dataset.id);
+      return;
+    case 'toggle-rail':
+      toggleRail();
       return;
     case 'open-note':
       if (id) openNote(id);
@@ -3351,6 +4432,46 @@ function onClick(event: MouseEvent): void {
       };
       renderModal();
       return;
+    case 'new-space':
+      ui.modal = { type: 'space' };
+      renderModal();
+      return;
+    case 'edit-space':
+      if (!id) return;
+      ui.modal = { type: 'space', spaceId: id };
+      renderModal();
+      return;
+    case 'delete-folder': {
+      const folder = folderById(id ?? '');
+      if (!folder) return;
+      const nested = folderDescendants(ui.db.folders, folder.id).size - 1;
+      askConfirm(
+        'Delete this folder?',
+        `“${folder.name}”${nested ? ` and its ${nested} ${nested === 1 ? 'subfolder' : 'subfolders'}` : ''} will be removed. Notes stay, but they leave this folder. This cannot be undone.`,
+        'Delete folder',
+        'delete-folder',
+        folder.id,
+      );
+      return;
+    }
+    case 'delete-space': {
+      const space = spaceById(id ?? '');
+      if (!space || space.kind === 'personal') return;
+      const personalSpace = ui.db.spaces.find(
+        (entry) => entry.kind === 'personal',
+      );
+      const count = ui.db.notes.filter(
+        (note) => note.spaceId === space.id,
+      ).length;
+      askConfirm(
+        'Delete this space?',
+        `“${space.name}” and its folders will be removed. ${count ? `${count} ${count === 1 ? 'note moves' : 'notes move'} to ${personalSpace?.name ?? 'your personal space'}. ` : ''}This cannot be undone.`,
+        'Delete space',
+        'delete-space',
+        space.id,
+      );
+      return;
+    }
     case 'set-tab': {
       const tab = actionEl.dataset.tab;
       if (tab === 'enhanced' || tab === 'raw' || tab === 'transcript') {
@@ -3520,6 +4641,9 @@ function onClick(event: MouseEvent): void {
     case 'remove-key':
       void removeAiKey();
       return;
+    case 'download-stt':
+      void downloadSttModel();
+      return;
     case 'export-all': {
       const notes = ui.db.notes.filter((entry) => !entry.deletedAt);
       exportNotes(notes);
@@ -3637,6 +4761,11 @@ function onChange(event: Event): void {
     return;
   const kind = target.dataset.change;
 
+  if (kind === 'stt-source') {
+    updateSttSettings();
+    return;
+  }
+
   if (kind === 'check' && target instanceof HTMLInputElement) {
     const id = target.dataset.id;
     if (!id) return;
@@ -3724,6 +4853,10 @@ function onSubmit(event: Event): void {
     createFolder(form);
     return;
   }
+  if (kind === 'space') {
+    saveSpace(form);
+    return;
+  }
   if (kind === 'template') {
     saveTemplate(form);
     return;
@@ -3782,6 +4915,7 @@ function onKeyDown(event: KeyboardEvent): void {
       ui.view = { name: 'notes' };
       renderAll();
     }
+    if (ui.railClosed) toggleRail();
     const field = document.querySelector<HTMLInputElement>(
       '[data-input="search"]',
     );
@@ -3934,12 +5068,19 @@ async function boot(): Promise<void> {
       generatingNoteId: null,
       sttError: '',
       sttWarned: false,
+      sttDownload: null,
       focusTitle: false,
       focusChat: false,
       transcriptHidden: false,
+      railClosed: false,
     };
     capture = createCapture();
     attachEvents();
+    window.api.onSttProgress((progress) => {
+      if (!ui.sttDownload) return;
+      ui.sttDownload = progress;
+      updateSttSettings();
+    });
     renderAll();
     void refreshCalendar();
     window.setInterval(() => void refreshCalendar(), 5 * 60_000);

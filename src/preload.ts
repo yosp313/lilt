@@ -3,6 +3,7 @@ import type {
   AiCompleteRequest,
   Api,
   Store,
+  SttProgress,
   TranscribeRequest,
 } from './shared/types.ts';
 
@@ -15,6 +16,13 @@ const api: Api = {
     ipcRenderer.invoke('ai:complete', request),
   transcribe: (request: TranscribeRequest) =>
     ipcRenderer.invoke('ai:transcribe', request),
+  sttDownload: (source) => ipcRenderer.invoke('stt:download', source),
+  onSttProgress: (callback: (progress: SttProgress) => void) => {
+    const listener = (_event: unknown, progress: SttProgress) =>
+      callback(progress);
+    ipcRenderer.on('stt:progress', listener);
+    return () => ipcRenderer.removeListener('stt:progress', listener);
+  },
   calendarStatus: () => ipcRenderer.invoke('calendar:status'),
   calendarConnect: (
     request: import('./shared/types.ts').CalendarConnectRequest,

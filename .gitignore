@@ -144,3 +144,6 @@ vite.config.ts.timestamp-*
 
 # Electron-Forge
 out/
+
+# Built whisper.cpp engine (npm run build:whisper)
+vendor/

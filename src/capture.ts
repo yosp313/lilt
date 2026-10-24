@@ -1,3 +1,10 @@
+import {
+  speechWindow,
+  SPEECH_FLOOR,
+  type SpeechWindow,
+  type VadFrame,
+} from './shared/logic.ts';
+
 export type CaptureState = 'recording' | 'paused' | 'stopped';
 
 export interface CaptureHandlers {
@@ -7,6 +14,7 @@ export interface CaptureHandlers {
     blob: Blob,
     startMs: number,
     endMs: number,
+    speech: SpeechWindow,
   ): void;
   onState(state: CaptureState): void;
   onNotice(message: string): void;
@@ -22,16 +30,22 @@ interface SourceLoop {
   timer: number | null;
   analyser: AnalyserNode;
   samples: Uint8Array<ArrayBuffer>;
+  frames: VadFrame[];
 }
 
 const CHUNK_MS = 7000;
-// shortcut: fixed 7s HTTP chunks, not streaming partials. A WebSocket STT
+// Whisper always pads to a 30s window, so short chunks waste most of the
+// compute. Local models take longer chunks to stay near real time.
+export const LOCAL_CHUNK_MS = 25_000;
+// shortcut: fixed HTTP chunks, not streaming partials. A WebSocket STT
 // provider (Deepgram/AssemblyAI) or whisper-stream is the upgrade path.
 const SILENCE_AFTER_MS = 15 * 60_000;
-const LOUD = 0.012;
+// 2048 samples (~43 ms at 48 kHz) sampled every 50 ms: no audio goes unseen.
+const LEVEL_TICK_MS = 50;
 
 export class Capture {
   private handlers: CaptureHandlers;
+  private chunkMs: () => number;
   private loops: SourceLoop[] = [];
   private audioContext: AudioContext | null = null;
   private activeMs = 0;
@@ -43,8 +57,12 @@ export class Capture {
   private silenceTimer: number | null = null;
   private stopping: Promise<void> | null = null;
 
-  constructor(handlers: CaptureHandlers) {
+  constructor(
+    handlers: CaptureHandlers,
+    chunkMs: () => number = () => CHUNK_MS,
+  ) {
     this.handlers = handlers;
+    this.chunkMs = chunkMs;
   }
 
   get elapsedMs(): number {
@@ -66,10 +84,12 @@ export class Capture {
     let mic: MediaStream;
     try {
       mic = await navigator.mediaDevices.getUserMedia({
+        // Raw-ish mic for ASR: AGC and noise suppression clip speech. Echo
+        // cancellation stays on so system audio is not transcribed twice.
         audio: {
           echoCancellation: true,
-          noiseSuppression: true,
-          autoGainControl: true,
+          noiseSuppression: false,
+          autoGainControl: false,
         },
       });
     } catch (error) {
@@ -109,7 +129,10 @@ export class Capture {
     this.resumedAt = performance.now();
     for (const loop of this.loops) this.startChunk(loop);
 
-    this.levelTimer = window.setInterval(() => this.tickLevels(), 90);
+    this.levelTimer = window.setInterval(
+      () => this.tickLevels(),
+      LEVEL_TICK_MS,
+    );
     this.silenceTimer = window.setInterval(() => this.checkSilence(), 5000);
     this.handlers.onState('recording');
   }
@@ -165,7 +188,7 @@ export class Capture {
     if (!context) return;
     const input = context.createMediaStreamSource(stream);
     const analyser = context.createAnalyser();
-    analyser.fftSize = 1024;
+    analyser.fftSize = 2048;
     const sink = context.createGain();
     sink.gain.value = 0;
     input.connect(analyser);
@@ -180,6 +203,7 @@ export class Capture {
       timer: null,
       analyser,
       samples: new Uint8Array(analyser.fftSize),
+      frames: [],
     });
     stream.getAudioTracks()[0]?.addEventListener('ended', () => {
       if (this.running && source === 'mic') {
@@ -205,6 +229,7 @@ export class Capture {
     }
     loop.recorder = recorder;
     loop.chunks = [];
+    loop.frames = [];
     loop.chunkStart = this.elapsedMs;
     recorder.ondataavailable = (event) => {
       if (event.data.size > 0) loop.chunks.push(event.data);
@@ -215,12 +240,16 @@ export class Capture {
       });
       loop.chunks = [];
       loop.recorder = null;
-      if (blob.size > 1200) {
+      const endMs = this.elapsedMs;
+      const speech = speechWindow(loop.frames, loop.chunkStart, endMs);
+      loop.frames = [];
+      if (blob.size > 1200 && speech) {
         this.handlers.onChunk(
           loop.source,
           blob,
           loop.chunkStart,
-          this.elapsedMs,
+          endMs,
+          speech,
         );
       }
       if (this.running && !this.paused) this.startChunk(loop);
@@ -228,7 +257,7 @@ export class Capture {
     recorder.start();
     loop.timer = window.setTimeout(() => {
       if (recorder.state === 'recording') recorder.stop();
-    }, CHUNK_MS);
+    }, this.chunkMs());
   }
 
   private stopChunk(loop: SourceLoop): Promise<void> {
@@ -247,10 +276,12 @@ export class Capture {
     let them = 0;
     for (const loop of this.loops) {
       const level = this.level(loop);
+      if (!this.paused) loop.frames.push({ atMs: this.elapsedMs, level });
       if (loop.source === 'mic') me = level;
       else them = level;
     }
-    if (me > LOUD || them > LOUD) this.lastLoudAt = this.elapsedMs;
+    if (me > SPEECH_FLOOR || them > SPEECH_FLOOR)
+      this.lastLoudAt = this.elapsedMs;
     this.handlers.onLevel(me, them);
   }
 

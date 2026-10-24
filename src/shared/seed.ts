@@ -475,7 +475,6 @@ export function createSeed(): Store {
         'Balanced notes for any meeting: what happened, what matters, what is next.',
       sections: ['Summary', 'Decisions', 'Action items'],
       builtin: true,
-      visibility: 'private',
     },
     {
       id: 'template-sales',
@@ -484,7 +483,6 @@ export function createSeed(): Store {
         'Capture the customer’s words, objections, risks and concrete next steps. Do not invent commitments.',
       sections: ['Context', 'What they said', 'Risks', 'Next steps'],
       builtin: true,
-      visibility: 'private',
     },
     {
       id: 'template-one-on-one',
@@ -493,7 +491,6 @@ export function createSeed(): Store {
         'A private, humane 1:1 note: wins, friction, growth and actions. Stay close to what was said.',
       sections: ['Wins', 'Friction', 'Growth', 'Actions'],
       builtin: true,
-      visibility: 'private',
     },
     {
       id: 'template-standup',
@@ -502,7 +499,6 @@ export function createSeed(): Store {
         'Short operational note: progress, blockers, owners, today’s plan.',
       sections: ['Progress', 'Blockers', 'Owners', 'Plan'],
       builtin: true,
-      visibility: 'private',
     },
     {
       id: 'template-interview',
@@ -511,16 +507,13 @@ export function createSeed(): Store {
         'Evidence-based interview note: signal, concerns, quotes and a recommendation.',
       sections: ['Signal', 'Concerns', 'Notable quotes', 'Recommendation'],
       builtin: true,
-      visibility: 'private',
     },
   ];
 
   return {
     workspace: {
-      id: 'ws-northwind',
-      name: 'Northwind Studio',
-      domain: 'northwind.studio',
-      plan: 'free',
+      id: 'ws-personal',
+      name: 'Personal',
     },
     user: {
       id: 'user-youssef',
@@ -533,14 +526,14 @@ export function createSeed(): Store {
         kind: 'personal',
         name: 'My notes',
         icon: 'lock',
-        description: 'Only you can see these notes.',
+        description: 'Your private notes.',
       },
       {
         id: 'space-team',
         kind: 'team',
-        name: 'Northwind team',
+        name: 'Work',
         icon: 'team',
-        description: 'Shared with everyone at northwind.studio.',
+        description: 'Meetings, clients and projects.',
       },
     ],
     folders: [
@@ -587,7 +580,6 @@ export function createSeed(): Store {
           'List every objection, risk or unresolved concern raised, with who raised it and the exact wording. Then name what would defuse each one.',
         scope: 'single',
         model: 'auto',
-        visibility: 'private',
       },
       {
         id: 'recipe-actions',
@@ -596,7 +588,6 @@ export function createSeed(): Store {
           'Across these meetings, list every action item with an owner and a date. Group by owner. Flag anything with no owner.',
         scope: 'multiple',
         model: 'auto',
-        visibility: 'workspace',
       },
       {
         id: 'recipe-recap',
@@ -605,12 +596,10 @@ export function createSeed(): Store {
           'Write a one-page recap I can send to the client: what we agreed, what is still open, and what happens next. Plain, warm, no jargon.',
         scope: 'single',
         model: 'standard',
-        visibility: 'private',
       },
     ],
     threads: [],
     settings: {
-      historyDays: 30,
       notifications: true,
       includeSystemAudio: true,
       sttLanguage: 'en',

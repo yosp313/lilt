@@ -20,16 +20,27 @@ import type {
   CalendarEvent,
   CalendarStatus,
   Store,
+  SttSource,
   TranscribeRequest,
 } from './shared/types.ts';
 import {
   escapeHtml,
   isLocalEndpoint,
+  LOCAL_STT_MODELS,
+  localSttSource,
   mapGoogleEvents,
   mapMicrosoftEvents,
   sanitizeSharedNote,
   sharedNoteFor,
+  type LocalSttSource,
 } from './shared/logic.ts';
+import {
+  downloadLocalModel,
+  localModelReady,
+  localServerTranscribe,
+  localTranscribe,
+  stopLocalServer,
+} from './local-stt.ts';
 import { createSeed } from './shared/seed.ts';
 import crypto from 'node:crypto';
 
@@ -56,19 +67,23 @@ const isDev = Boolean(MAIN_WINDOW_VITE_DEV_SERVER_URL);
 
 interface StoredAiConfig {
   baseUrl: string;
+  sttServerUrl: string;
   chatModel: string;
   thinkingModel: string;
   sttModel: string;
   sttLanguage: string;
+  sttSource: SttSource;
   keyEncrypted?: string;
 }
 
 const DEFAULT_AI: StoredAiConfig = {
   baseUrl: 'https://api.openai.com/v1',
+  sttServerUrl: 'http://127.0.0.1:8080',
   chatModel: 'gpt-4.1-mini',
   thinkingModel: 'gpt-4.1',
   sttModel: 'whisper-1',
   sttLanguage: 'en',
+  sttSource: 'whisper-small',
 };
 
 let storeCache: Store;
@@ -83,6 +98,10 @@ async function readStore(): Promise<Store> {
       await fs.promises.readFile(storePath(), 'utf8'),
     ) as Store;
     if (!isStore(parsed)) throw new Error('Store is missing required fields');
+    // Legacy subscription fields are no longer part of the personal build.
+    delete (parsed.workspace as { plan?: unknown }).plan;
+    delete (parsed.workspace as { domain?: unknown }).domain;
+    delete (parsed.settings as { historyDays?: unknown }).historyDays;
     for (const note of parsed.notes) {
       if (note.share) {
         const mode = (note.share as { mode?: string }).mode;
@@ -154,7 +173,15 @@ function readAiConfig(): StoredAiConfig {
     const parsed = JSON.parse(
       fs.readFileSync(aiConfigPath(), 'utf8'),
     ) as StoredAiConfig;
-    return { ...DEFAULT_AI, ...parsed };
+    const config = { ...DEFAULT_AI, ...parsed };
+    if (
+      config.sttSource !== 'cloud' &&
+      config.sttSource !== 'local-server' &&
+      localSttSource(config.sttSource) === null
+    ) {
+      config.sttSource = DEFAULT_AI.sttSource;
+    }
+    return config;
   } catch {
     return { ...DEFAULT_AI };
   }
@@ -190,11 +217,23 @@ function apiKey(): string {
 function aiStatus(): AiConfig {
   const config = readAiConfig();
   const key = apiKey();
+  const local = localSttSource(config.sttSource);
   return {
     // shortcut: one flag covers chat + STT, so a Whisper-only local server
     // looks configured and its chat calls fail. Split when that matters.
     configured: key.length > 0 || isLocalEndpoint(config.baseUrl),
+    sttSource: config.sttSource,
+    sttReady:
+      config.sttSource === 'local-server'
+        ? config.sttServerUrl.trim().length > 0
+        : local
+          ? localModelReady(dataDir(), local)
+          : key.length > 0 || isLocalEndpoint(config.baseUrl),
+    localModels: (Object.keys(LOCAL_STT_MODELS) as LocalSttSource[]).map(
+      (id) => ({ id, ready: localModelReady(dataDir(), id) }),
+    ),
     baseUrl: config.baseUrl,
+    sttServerUrl: config.sttServerUrl,
     chatModel: config.chatModel,
     thinkingModel: config.thinkingModel,
     sttModel: config.sttModel,
@@ -274,13 +313,50 @@ async function complete(req: AiCompleteRequest): Promise<{ text: string }> {
 
 async function transcribe(req: TranscribeRequest): Promise<{ text: string }> {
   const config = readAiConfig();
+  if (config.sttSource === 'local-server') {
+    if (!config.sttServerUrl.trim())
+      throw new Error(
+        'Set the local Whisper server URL in Settings → Intelligence.',
+      );
+    if (!req.pcm || req.pcm.length === 0)
+      throw new Error('Local transcription needs audio samples.');
+    return {
+      text: await localServerTranscribe(
+        config.sttServerUrl,
+        req.pcm,
+        req.language,
+        req.prompt,
+        config.sttModel,
+      ),
+    };
+  }
+  const local = localSttSource(config.sttSource);
+  if (local) {
+    if (!localModelReady(dataDir(), local))
+      throw new Error(
+        'The local Whisper model is not downloaded. Open Settings → Intelligence and download it.',
+      );
+    if (!req.pcm || req.pcm.length === 0)
+      throw new Error('Local transcription needs audio samples.');
+    return {
+      text: await localTranscribe(
+        dataDir(),
+        local,
+        req.pcm,
+        req.language,
+        req.prompt,
+      ),
+    };
+  }
   const key = apiKey();
   if (!key && !isLocalEndpoint(config.baseUrl))
     throw new Error(
       'No API key configured. Add one in Settings → Intelligence.',
     );
-  if (req.data.byteLength > 24 * 1024 * 1024) {
-    throw new Error('Audio chunk is too large');
+  if (!req.data || req.data.byteLength > 24 * 1024 * 1024) {
+    throw new Error(
+      req.data ? 'Audio chunk is too large' : 'No audio chunk was sent',
+    );
   }
   const form = new FormData();
   form.append(
@@ -293,6 +369,7 @@ async function transcribe(req: TranscribeRequest): Promise<{ text: string }> {
   if (req.language && req.language !== 'auto') {
     form.append('language', req.language);
   }
+  if (req.prompt) form.append('prompt', req.prompt);
   const response = await fetch(endpoint(config, '/audio/transcriptions'), {
     method: 'POST',
     headers: key ? { Authorization: `Bearer ${key}` } : {},
@@ -895,20 +972,30 @@ function registerIpc(): void {
       _event,
       next: {
         baseUrl: string;
+        sttServerUrl: string;
         chatModel: string;
         thinkingModel: string;
         sttModel: string;
         sttLanguage: string;
+        sttSource: SttSource;
         apiKey?: string;
       },
     ) => {
       const config = readAiConfig();
       config.baseUrl = next.baseUrl.trim() || DEFAULT_AI.baseUrl;
+      config.sttServerUrl = next.sttServerUrl.trim() || DEFAULT_AI.sttServerUrl;
       config.chatModel = next.chatModel.trim() || DEFAULT_AI.chatModel;
       config.thinkingModel =
         next.thinkingModel.trim() || DEFAULT_AI.thinkingModel;
       config.sttModel = next.sttModel.trim() || DEFAULT_AI.sttModel;
       config.sttLanguage = next.sttLanguage.trim() || DEFAULT_AI.sttLanguage;
+      if (
+        next.sttSource === 'cloud' ||
+        next.sttSource === 'local-server' ||
+        localSttSource(next.sttSource) !== null
+      ) {
+        config.sttSource = next.sttSource;
+      }
       if (typeof next.apiKey === 'string') {
         if (next.apiKey.length === 0) {
           delete config.keyEncrypted;
@@ -934,6 +1021,17 @@ function registerIpc(): void {
   ipcMain.handle('ai:transcribe', (_event, req: TranscribeRequest) =>
     transcribe(req),
   );
+  ipcMain.handle('stt:download', async (event, requested: SttSource) => {
+    const source = localSttSource(requested);
+    if (!source)
+      throw new Error('Choose a local Whisper model in Settings first.');
+    await downloadLocalModel(dataDir(), source, (progress) => {
+      if (!event.sender.isDestroyed()) {
+        event.sender.send('stt:progress', progress);
+      }
+    });
+    return aiStatus();
+  });
 
   ipcMain.handle('calendar:status', () => calendarStatus());
   ipcMain.handle(
@@ -1071,5 +1169,6 @@ app.on('window-all-closed', () => {
 });
 
 app.on('before-quit', () => {
+  stopLocalServer();
   shareServer?.close();
 });

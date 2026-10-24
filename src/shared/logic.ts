@@ -5,7 +5,6 @@ import type {
   EnhancedNote,
   Folder,
   Note,
-  Plan,
   RetrievalHit,
   Scope,
   Section,
@@ -14,6 +13,7 @@ import type {
   SourceRef,
   SpeakerSource,
   Store,
+  SttSource,
   Template,
   Workspace,
 } from './types.ts';
@@ -68,43 +68,8 @@ const STOPWORDS = new Set([
   'not',
 ]);
 
-export function historyCutoff(plan: Plan, now: number, days = 30): number {
-  return plan === 'free' ? now - days * DAY_MS : 0;
-}
-
-export function isHistoryVisible(
-  note: Note,
-  plan: Plan,
-  now: number,
-  days = 30,
-): boolean {
-  return new Date(note.createdAt).getTime() >= historyCutoff(plan, now, days);
-}
-
-export function visibleNotes(store: Store, now = Date.now()): Note[] {
-  return store.notes.filter(
-    (note) =>
-      !note.deletedAt &&
-      isHistoryVisible(
-        note,
-        store.workspace.plan,
-        now,
-        store.settings.historyDays,
-      ),
-  );
-}
-
-export function hiddenByHistory(store: Store, now = Date.now()): number {
-  return store.notes.filter(
-    (note) =>
-      !note.deletedAt &&
-      !isHistoryVisible(
-        note,
-        store.workspace.plan,
-        now,
-        store.settings.historyDays,
-      ),
-  ).length;
+export function visibleNotes(store: Store): Note[] {
+  return store.notes.filter((note) => !note.deletedAt);
 }
 
 export function normalize(value: string): string {
@@ -187,18 +152,17 @@ function scoreNote(note: Note, terms: string[]): number {
   return score;
 }
 
-export function scopeNotes(
-  store: Store,
-  scope: Scope,
-  now = Date.now(),
-): Note[] {
-  const notes = visibleNotes(store, now);
+export function scopeNotes(store: Store, scope: Scope): Note[] {
+  const notes = visibleNotes(store);
   if (scope.type === 'all') return notes;
   if (scope.type === 'note') {
     return notes.filter((note) => note.id === scope.id);
   }
   if (scope.type === 'folder') {
-    return notes.filter((note) => note.folderIds.includes(scope.id ?? ''));
+    const folders = folderDescendants(store.folders, scope.id ?? '');
+    return notes.filter((note) =>
+      note.folderIds.some((folderId) => folders.has(folderId)),
+    );
   }
   if (scope.type === 'space') {
     return notes.filter((note) => note.spaceId === scope.id);
@@ -216,10 +180,9 @@ export function retrieve(
   store: Store,
   scope: Scope,
   query: string,
-  now = Date.now(),
 ): RetrievalHit[] {
   const terms = queryTerms(query);
-  const notes = scopeNotes(store, scope, now);
+  const notes = scopeNotes(store, scope);
   if (terms.length === 0) return [];
   const hits: RetrievalHit[] = [];
   for (const note of notes) {
@@ -302,8 +265,9 @@ export function buildEnhanceMessages(
     .slice(-18_000);
   const system = [
     'You turn a meeting transcript plus the user’s rough notes into crisp enhanced notes.',
-    'Return JSON only: {"sections":[{"heading":"...","bullets":[{"text":"...","quote":"..."}]}]}.',
+    'Return JSON only: {"attendees":["..."],"sections":[{"heading":"...","bullets":[{"text":"...","quote":"..."}]}]}.',
     `Use exactly these section headings: ${sections.join(' | ')}.`,
+    'attendees lists the people who took part in the meeting, using the names they are called by in the transcript. Omit companies, roles, and people only mentioned in passing.',
     'Each bullet is one clear sentence. The quote must be copied verbatim from the transcript or the raw notes, 8–240 characters, and must support the bullet.',
     'Never invent facts, names, owners or dates. If the material does not support a section, return it with an empty bullets array.',
     'Prefer the user’s rough notes for emphasis and the transcript for detail.',
@@ -330,17 +294,56 @@ export function buildEnhanceMessages(
   ];
 }
 
+function modelJson(text: string): Record<string, unknown> {
+  const start = text.indexOf('{');
+  const end = text.lastIndexOf('}');
+  if (start === -1 || end <= start)
+    throw new Error('Model did not return JSON');
+  return JSON.parse(text.slice(start, end + 1)) as Record<string, unknown>;
+}
+
+export function buildAttendeeMessages(note: Note): {
+  role: 'system' | 'user';
+  content: string;
+}[] {
+  const transcript = note.transcript
+    .map((segment) => `${segment.speaker}: ${segment.text}`)
+    .join('\n')
+    .slice(-12_000);
+  return [
+    {
+      role: 'system',
+      content: [
+        'You identify who took part in a meeting from its transcript.',
+        'Return JSON only: {"attendees":["Full Name"]}.',
+        'Use the names people are called by in the transcript. Do not include companies, job titles, or people who are only mentioned in passing.',
+        'Return an empty array when no participant names are clear.',
+      ].join('\n'),
+    },
+    {
+      role: 'user',
+      content: [
+        `Meeting: ${note.title}`,
+        note.attendees.length
+          ? `Known attendees: ${note.attendees.join(', ')}`
+          : '',
+        '',
+        'TRANSCRIPT:',
+        transcript || '(none)',
+      ]
+        .filter(Boolean)
+        .join('\n'),
+    },
+  ];
+}
+
 export function parseEnhancedResponse(
   text: string,
   note: Note,
   templateId: string | null,
   model: string,
 ): EnhancedNote {
-  const start = text.indexOf('{');
-  const end = text.lastIndexOf('}');
-  if (start === -1 || end <= start)
-    throw new Error('Model did not return JSON');
-  const parsed = JSON.parse(text.slice(start, end + 1)) as {
+  const parsed = modelJson(text) as {
     sections?: {
       heading?: unknown;
       bullets?: (string | { text?: unknown; quote?: unknown })[];
@@ -374,6 +377,29 @@ export function parseEnhancedResponse(
     model,
     sections,
   };
+}
+
+/** People named in the same model reply that produced the enhanced note. */
+export function parseAttendees(text: string): string[] {
+  let value: unknown;
+  try {
+    value = modelJson(text).attendees;
+  } catch {
+    return [];
+  }
+  if (!Array.isArray(value)) return [];
+  const names: string[] = [];
+  for (const raw of value) {
+    if (typeof raw !== 'string') continue;
+    const name = raw.replace(/\s+/g, ' ').trim();
+    if (name.length < 2 || name.length > 60) continue;
+    if (/^(me|you|them|speaker \d+|unknown|n\/a)$/i.test(name)) continue;
+    if (names.some((entry) => entry.toLowerCase() === name.toLowerCase()))
+      continue;
+    names.push(name);
+    if (names.length >= 20) break;
+  }
+  return names;
 }
 
 export function localEnhance(
@@ -525,6 +551,142 @@ export function isLocalEndpoint(baseUrl: string): boolean {
     host === '::1' ||
     host === '[::1]'
   );
+}
+
+export type LocalSttSource = Exclude<SttSource, 'cloud' | 'local-server'>;
+
+/**
+ * Local Whisper runs through whisper.cpp on the CPU, so encoder size sets the
+ * pace. small q5 (~190 MB) keeps up with live capture on a laptop core;
+ * large-v3-turbo is more accurate but ~3× the encoder work and falls behind.
+ */
+export const LOCAL_STT_MODELS: Record<
+  LocalSttSource,
+  {
+    label: string;
+    file: string;
+    url: string;
+    sizeMb: number;
+  }
+> = {
+  'whisper-small': {
+    label: 'Whisper small',
+    file: 'ggml-small-q5_1.bin',
+    url: 'https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-small-q5_1.bin',
+    sizeMb: 190,
+  },
+  'whisper-large-v3-turbo': {
+    label: 'Whisper large-v3 turbo',
+    file: 'ggml-large-v3-turbo-q5_0.bin',
+    url: 'https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-large-v3-turbo-q5_0.bin',
+    sizeMb: 574,
+  },
+};
+
+/**
+ * whisper.cpp reads 16 kHz mono WAV, so PCM from the capture path is packed
+ * into one before each run. Browser-safe: no Buffer, so the renderer and the
+ * node tests can use it too.
+ */
+export function encodeWav(
+  pcm: Float32Array,
+  sampleRate = 16000,
+): Uint8Array<ArrayBuffer> {
+  const bytes = new Uint8Array(44 + pcm.length * 2);
+  const view = new DataView(bytes.buffer);
+  const ascii = (offset: number, text: string) => {
+    for (let i = 0; i < text.length; i++)
+      view.setUint8(offset + i, text.charCodeAt(i));
+  };
+  ascii(0, 'RIFF');
+  view.setUint32(4, 36 + pcm.length * 2, true);
+  ascii(8, 'WAVE');
+  ascii(12, 'fmt ');
+  view.setUint32(16, 16, true);
+  view.setUint16(20, 1, true);
+  view.setUint16(22, 1, true);
+  view.setUint32(24, sampleRate, true);
+  view.setUint32(28, sampleRate * 2, true);
+  view.setUint16(32, 2, true);
+  view.setUint16(34, 16, true);
+  ascii(36, 'data');
+  view.setUint32(40, pcm.length * 2, true);
+  for (let i = 0; i < pcm.length; i++) {
+    const clamped = Math.max(-1, Math.min(1, pcm[i]));
+    view.setInt16(44 + i * 2, Math.round(clamped * 32767), true);
+  }
+  return bytes;
+}
+
+export function localSttSource(value: string): LocalSttSource | null {
+  return Object.hasOwn(LOCAL_STT_MODELS, value)
+    ? (value as LocalSttSource)
+    : null;
+}
+
+// ---------------------------------------------------------------------------
+// Voice activity
+// ---------------------------------------------------------------------------
+
+/** Scaled RMS below this is room noise, above it is speech. */
+export const SPEECH_FLOOR = 0.006;
+const VAD_PAD_BEFORE_MS = 250;
+const VAD_PAD_AFTER_MS = 350;
+
+export interface VadFrame {
+  /** Capture clock when the level was sampled. */
+  atMs: number;
+  level: number;
+}
+
+/** Speech inside a chunk, in ms from the chunk's start. */
+export interface SpeechWindow {
+  startMs: number;
+  endMs: number;
+}
+
+/**
+ * Find speech inside one recorded chunk from its sampled levels. Silence is
+ * never sent to a model: Whisper invents lines over it and free tiers bill it.
+ */
+export function speechWindow(
+  frames: VadFrame[],
+  chunkStartMs: number,
+  chunkEndMs: number,
+): SpeechWindow | null {
+  const duration = chunkEndMs - chunkStartMs;
+  if (duration <= 0) return null;
+  // Throttled timers can leave a chunk unsampled; keep the audio rather than
+  // guess it was silence.
+  if (frames.length === 0) return { startMs: 0, endMs: duration };
+  let first = -1;
+  let last = -1;
+  let speechFrames = 0;
+  for (const frame of frames) {
+    if (frame.level < SPEECH_FLOOR) continue;
+    if (first < 0) first = frame.atMs;
+    last = frame.atMs;
+    speechFrames += 1;
+  }
+  // One loud sample is a click; speech lasts at least two 50 ms frames.
+  if (first < 0 || speechFrames < 2) return null;
+  const startMs = Math.max(0, first - chunkStartMs - VAD_PAD_BEFORE_MS);
+  const endMs = Math.min(duration, last - chunkStartMs + VAD_PAD_AFTER_MS);
+  return endMs > startMs ? { startMs, endMs } : null;
+}
+
+/** Cut a decoded 16 kHz chunk down to its speech window. */
+export function trimPcm(
+  pcm: Float32Array,
+  window: SpeechWindow,
+  sampleRate = 16000,
+): Float32Array {
+  const start = Math.max(0, Math.floor((window.startMs / 1000) * sampleRate));
+  const end = Math.min(
+    pcm.length,
+    Math.ceil((window.endMs / 1000) * sampleRate),
+  );
+  return end > start ? pcm.slice(start, end) : pcm;
 }
 
 // ---------------------------------------------------------------------------
@@ -741,11 +903,36 @@ export function noteSummary(note: Note): string {
 }
 
 export function folderPath(folders: Folder[], folderId: string): string {
-  const folder = folders.find((entry) => entry.id === folderId);
-  if (!folder) return '';
-  if (!folder.parentId) return folder.name;
-  const parent = folders.find((entry) => entry.id === folder.parentId);
-  return parent ? `${parent.name} / ${folder.name}` : folder.name;
+  const names: string[] = [];
+  const seen = new Set<string>();
+  let current = folders.find((entry) => entry.id === folderId);
+  while (current && !seen.has(current.id)) {
+    seen.add(current.id);
+    names.unshift(current.name);
+    const parentId = current.parentId;
+    current = parentId
+      ? folders.find((entry) => entry.id === parentId)
+      : undefined;
+  }
+  return names.join(' / ');
+}
+
+/** The folder itself plus every folder nested under it. */
+export function folderDescendants(
+  folders: Folder[],
+  folderId: string,
+): Set<string> {
+  const ids = new Set<string>();
+  const queue = [folderId];
+  while (queue.length > 0) {
+    const id = queue.pop();
+    if (!id || ids.has(id)) continue;
+    ids.add(id);
+    for (const folder of folders) {
+      if (folder.parentId === id) queue.push(folder.id);
+    }
+  }
+  return ids;
 }
 
 export function toCsv(notes: Note[]): string {
@@ -821,13 +1008,13 @@ export function escapeHtml(value: unknown): string {
     /[&<>"']/g,
     (char) =>
       (
-        ({
+        {
           '&': '&amp;',
           '<': '&lt;',
           '>': '&gt;',
           '"': '&quot;',
           "'": '&#39;',
-        }) as Record<string, string>
+        } as Record<string, string>
       )[char],
   );
 }
