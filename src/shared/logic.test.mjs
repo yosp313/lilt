@@ -2,6 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import {
   calendarEventKey,
+  chunkEndedByPause,
   dueReminder,
   encodeWav,
   folderDescendants,
@@ -101,6 +102,17 @@ test('a speech window is clamped to the chunk and an unsampled one is kept', () 
     { startMs: 0, endMs: 7000 },
   );
   assert.deepEqual(speechWindow([], 0, 7000), { startMs: 0, endMs: 7000 });
+});
+
+test('a chunk ends only after real speech is followed by a pause', () => {
+  // Silence before the first word never closes a chunk.
+  assert.equal(chunkEndedByPause(null, 0, 10_000), false);
+  // A short "mm-hm" is not enough speech to cut on.
+  assert.equal(chunkEndedByPause(1000, 1500, 4000), false);
+  // Two seconds of speech, then 700 ms of quiet: not yet.
+  assert.equal(chunkEndedByPause(1000, 3000, 3700), false);
+  // Same speech, 800 ms of quiet: flush.
+  assert.equal(chunkEndedByPause(1000, 3000, 3800), true);
 });
 
 test('trimming keeps the samples inside the speech window', () => {

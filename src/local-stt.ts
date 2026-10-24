@@ -237,6 +237,16 @@ async function infer(
   form.append('language', language && language !== 'auto' ? language : 'auto');
   form.append('temperature', '0');
   form.append('suppress_nst', 'true');
+  // whisper.cpp always runs the encoder over 30 s of audio. Telling it how
+  // long this chunk actually is cuts inference by about a third. 320 samples
+  // is one encoder frame (16 kHz / 50 frames per second); the pad keeps the
+  // last word inside the window.
+  if (!allowOpenAi) {
+    form.append(
+      'audio_ctx',
+      String(Math.min(1500, Math.ceil(pcm.length / 320) + 40)),
+    );
+  }
   if (prompt) form.append('prompt', prompt);
   const response = await fetch(`${url}/inference`, {
     method: 'POST',

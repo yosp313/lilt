@@ -153,7 +153,7 @@ interface ChunkJob {
 }
 
 const busySources = new Set<'mic' | 'system'>();
-const queuedChunks = new Map<'mic' | 'system', ChunkJob>();
+const queuedChunks = new Map<'mic' | 'system', ChunkJob[]>();
 let toastTimer: number | null = null;
 let saveTimer: number | null = null;
 let saveFailed = false;
@@ -543,19 +543,34 @@ function queueChunk(job: ChunkJob): void {
     return;
   }
   pendingTranscriptions += 1;
-  if (busySources.has(job.source)) {
-    const replaced = queuedChunks.get(job.source);
-    if (replaced) pendingTranscriptions -= 1;
-    // shortcut: one queued chunk per source, so a long STT stall drops older
-    // audio; upgrade to a bounded disk queue if providers get slower.
-    queuedChunks.set(job.source, job);
-    return;
-  }
-  void runChunk(job);
+  const queue = queuedChunks.get(job.source) ?? [];
+  queue.push(job);
+  queuedChunks.set(job.source, queue);
+  // shortcut: whole chunks wait in memory, so a provider that never catches up
+  // grows the backlog instead of dropping audio; move to a disk queue if a
+  // meeting ever outlasts available memory.
+  if (!busySources.has(job.source)) void runChunks(job.source);
 }
 
-async function runChunk(job: ChunkJob): Promise<void> {
-  busySources.add(job.source);
+async function runChunks(source: 'mic' | 'system'): Promise<void> {
+  busySources.add(source);
+  try {
+    for (;;) {
+      const job = queuedChunks.get(source)?.shift();
+      if (!job) break;
+      try {
+        await transcribeChunk(job);
+      } finally {
+        pendingTranscriptions = Math.max(0, pendingTranscriptions - 1);
+      }
+    }
+  } finally {
+    busySources.delete(source);
+    queuedChunks.delete(source);
+  }
+}
+
+async function transcribeChunk(job: ChunkJob): Promise<void> {
   try {
     const local = ui.ai.sttSource !== 'cloud';
     const prompt = sttPrompt(noteById(job.noteId));
@@ -589,14 +604,6 @@ async function runChunk(job: ChunkJob): Promise<void> {
         'Transcription failed. Check the provider key and model in Settings → Intelligence. No audio was saved.';
       toast('Transcription failed. No audio was kept.');
       if (ui.view.name === 'note') renderMain();
-    }
-  } finally {
-    busySources.delete(job.source);
-    pendingTranscriptions = Math.max(0, pendingTranscriptions - 1);
-    const next = queuedChunks.get(job.source);
-    if (next) {
-      queuedChunks.delete(job.source);
-      void runChunk(next);
     }
   }
 }
@@ -1620,7 +1627,7 @@ ${note.rawNotes}</textarea>
                     ? html`<div class="transcript-empty">
                         ${icon('wave', 20)}
                         <p>
-                          ${ui.ai.sttReady ? (ui.ai.sttSource === 'cloud' ? 'Listening. The first lines appear after a few seconds.' : 'Listening. The first lines appear in about half a minute.') : 'Capturing levels. Choose a speech-to-text model in Settings to see words here.'}
+                          ${ui.ai.sttReady ? (ui.ai.sttSource === 'cloud' ? 'Listening. The first lines appear after a few seconds.' : 'Listening. Text appears a few seconds after you pause.') : 'Capturing levels. Choose a speech-to-text model in Settings to see words here.'}
                         </p>
                       </div>`
                     : transcriptList(note, true)

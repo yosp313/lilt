@@ -675,6 +675,24 @@ export function speechWindow(
   return endMs > startMs ? { startMs, endMs } : null;
 }
 
+/** A pause this long after speech ends a chunk, so phrases are not cut. */
+export const ENDPOINT_SILENCE_MS = 800;
+/** Speech shorter than this waits for more; Whisper needs a little context. */
+export const MIN_SPEECH_MS = 2000;
+
+/** True when a chunk holds enough speech and has paused long enough to flush. */
+export function chunkEndedByPause(
+  speechStartedAtMs: number | null,
+  lastLoudAtMs: number,
+  nowMs: number,
+): boolean {
+  if (speechStartedAtMs === null) return false;
+  return (
+    nowMs - lastLoudAtMs >= ENDPOINT_SILENCE_MS &&
+    lastLoudAtMs - speechStartedAtMs >= MIN_SPEECH_MS
+  );
+}
+
 /** Cut a decoded 16 kHz chunk down to its speech window. */
 export function trimPcm(
   pcm: Float32Array,

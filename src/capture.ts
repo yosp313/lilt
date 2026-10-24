@@ -1,4 +1,5 @@
 import {
+  chunkEndedByPause,
   speechWindow,
   SPEECH_FLOOR,
   type SpeechWindow,
@@ -31,12 +32,15 @@ interface SourceLoop {
   analyser: AnalyserNode;
   samples: Uint8Array<ArrayBuffer>;
   frames: VadFrame[];
+  /** First loud frame of this chunk, in capture ms. */
+  speechStart: number | null;
+  lastLoud: number;
 }
 
 const CHUNK_MS = 7000;
-// Whisper always pads to a 30s window, so short chunks waste most of the
-// compute. Local models take longer chunks to stay near real time.
-export const LOCAL_CHUNK_MS = 25_000;
+// Chunks end at a pause; this is only the cap for unbroken speech. Local
+// models read a shorter window, so a capped chunk stays cheap.
+export const LOCAL_CHUNK_MS = 15_000;
 // shortcut: fixed HTTP chunks, not streaming partials. A WebSocket STT
 // provider (Deepgram/AssemblyAI) or whisper-stream is the upgrade path.
 const SILENCE_AFTER_MS = 15 * 60_000;
@@ -204,6 +208,8 @@ export class Capture {
       analyser,
       samples: new Uint8Array(analyser.fftSize),
       frames: [],
+      speechStart: null,
+      lastLoud: 0,
     });
     stream.getAudioTracks()[0]?.addEventListener('ended', () => {
       if (this.running && source === 'mic') {
@@ -230,6 +236,8 @@ export class Capture {
     loop.recorder = recorder;
     loop.chunks = [];
     loop.frames = [];
+    loop.speechStart = null;
+    loop.lastLoud = 0;
     loop.chunkStart = this.elapsedMs;
     recorder.ondataavailable = (event) => {
       if (event.data.size > 0) loop.chunks.push(event.data);
@@ -260,6 +268,14 @@ export class Capture {
     }, this.chunkMs());
   }
 
+  private flushChunk(loop: SourceLoop): void {
+    if (loop.timer !== null) window.clearTimeout(loop.timer);
+    loop.timer = null;
+    if (loop.recorder?.state !== 'recording') return;
+    // onstop builds the blob and starts the next chunk.
+    loop.recorder.stop();
+  }
+
   private stopChunk(loop: SourceLoop): Promise<void> {
     if (loop.timer !== null) window.clearTimeout(loop.timer);
     loop.timer = null;
@@ -276,7 +292,18 @@ export class Capture {
     let them = 0;
     for (const loop of this.loops) {
       const level = this.level(loop);
-      if (!this.paused) loop.frames.push({ atMs: this.elapsedMs, level });
+      if (!this.paused) {
+        const atMs = this.elapsedMs;
+        loop.frames.push({ atMs, level });
+        if (level >= SPEECH_FLOOR) {
+          if (loop.speechStart === null) loop.speechStart = atMs;
+          loop.lastLoud = atMs;
+        } else if (chunkEndedByPause(loop.speechStart, loop.lastLoud, atMs)) {
+          // Flushing on the pause means the transcript arrives seconds after
+          // a thought ends, and each chunk starts and ends on a word boundary.
+          this.flushChunk(loop);
+        }
+      }
       if (loop.source === 'mic') me = level;
       else them = level;
     }
