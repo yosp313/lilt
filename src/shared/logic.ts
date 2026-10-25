@@ -575,6 +575,12 @@ export const LOCAL_STT_MODELS: Record<
     url: 'https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-small-q5_1.bin',
     sizeMb: 190,
   },
+  'whisper-medium': {
+    label: 'Whisper medium',
+    file: 'ggml-medium-q5_0.bin',
+    url: 'https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-medium-q5_0.bin',
+    sizeMb: 770,
+  },
   'whisper-large-v3-turbo': {
     label: 'Whisper large-v3 turbo',
     file: 'ggml-large-v3-turbo-q5_0.bin',

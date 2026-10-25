@@ -366,9 +366,8 @@ async function transcribe(req: TranscribeRequest): Promise<{ text: string }> {
   );
   form.append('model', config.sttModel);
   form.append('response_format', 'json');
-  if (req.language && req.language !== 'auto') {
-    form.append('language', req.language);
-  }
+  // Auto-detect for mixed-language / code-switching (Arabic + English, etc.).
+  // Whisper-large-v3-turbo detects well; forcing a language breaks mixed speech.
   if (req.prompt) form.append('prompt', req.prompt);
   const response = await fetch(endpoint(config, '/audio/transcriptions'), {
     method: 'POST',
@@ -747,6 +746,7 @@ async function calendarToken(record: CalendarRecord): Promise<string> {
   return tokens.access_token!;
 }
 
+// shortcut: integration-test surface — calendar + STT + chunk queue; see docs/adrs/integration-tests.md
 async function fetchCalendarEvents(): Promise<CalendarEvent[]> {
   const record = readCalendar();
   if (!record) return [];

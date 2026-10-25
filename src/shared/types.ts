@@ -201,6 +201,7 @@ export type SttSource =
   | 'cloud'
   | 'local-server'
   | 'whisper-small'
+  | 'whisper-medium'
   | 'whisper-large-v3-turbo';
 
 export interface AiConfig {
