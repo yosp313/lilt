@@ -32,6 +32,7 @@ import {
   mapMicrosoftEvents,
   sanitizeSharedNote,
   sharedNoteFor,
+  shouldImportFallback,
   type LocalSttSource,
 } from './shared/logic.ts';
 import {
@@ -43,6 +44,8 @@ import {
 } from './local-stt.ts';
 import { createSeed } from './shared/seed.ts';
 import crypto from 'node:crypto';
+import { startMeetingPolling } from './meeting-detection.ts';
+import { registerAudioRetentionIpc } from './audio-retention.ts';
 
 if (started) app.quit();
 
@@ -154,10 +157,14 @@ function isStore(value: unknown): value is Store {
   );
 }
 
-function writeStore(store: Store): Promise<string> {
+function writeStore(store: Store, fallback = false): Promise<string> {
   storeCache = store;
-  const body = JSON.stringify(store);
   const savedAt = new Date().toISOString();
+  // Mark fallback writes so a startup seed (or migrated JSON) is never
+  // mistaken for a newer save and imported over IndexedDB.
+  const body = JSON.stringify(
+    fallback ? { ...store, fallbackSavedAt: savedAt } : store,
+  );
   const next = saveQueue.then(async () => {
     const tmp = storePath() + '.tmp';
     await fs.promises.writeFile(tmp, body, { encoding: 'utf8', mode: 0o600 });
@@ -201,22 +208,97 @@ function writeAiConfig(config: StoredAiConfig): void {
   }
 }
 
-function apiKey(): string {
+// The dev server can swap the renderer frame mid-load; run the script again once
+// it settles instead of failing the IPC call.
+async function rendererEval<T>(
+  window: BrowserWindow,
+  code: string,
+): Promise<T> {
+  try {
+    return (await window.webContents.executeJavaScript(code)) as T;
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    if (
+      !message.includes('WebFrame was removed') &&
+      !message.includes('Render frame was disposed')
+    ) {
+      throw error;
+    }
+    if (window.isDestroyed() || window.webContents.isDestroyed()) throw error;
+    if (window.webContents.isLoading()) {
+      await new Promise<void>((resolve) =>
+        window.webContents.once('did-stop-loading', () => resolve()),
+      );
+    } else {
+      await new Promise((resolve) => setTimeout(resolve, 100));
+    }
+    return (await window.webContents.executeJavaScript(code)) as T;
+  }
+}
+
+// IndexedDB lives in the renderer, so migration state is owned by db/indexeddb.ts.
+async function migrateStoreIfNeeded(window: BrowserWindow): Promise<void> {
+  const jsonPath = storePath();
+  if (!fs.existsSync(jsonPath)) return;
+  const done = await rendererEval<boolean>(
+    window,
+    'window.liltDb.isMigrationDone()',
+  );
+  if (done) return;
+
+  const parsed = JSON.parse(
+    await fs.promises.readFile(jsonPath, 'utf8'),
+  ) as Store;
+  await rendererEval<void>(
+    window,
+    `window.liltDb.migrateFromJson(${JSON.stringify(parsed)})`,
+  );
+
+  const backupPath = `${jsonPath}.migrated-backup`;
+  await fs.promises.copyFile(jsonPath, backupPath);
+  await fs.promises.chmod(backupPath, 0o600).catch(() => {});
+}
+
+/** store.json is only written when an IndexedDB save fails, so it wins when newer. */
+async function newerJsonStore(idbSavedAt: string): Promise<Store | null> {
+  try {
+    const stat = await fs.promises.stat(storePath());
+    if (!(stat.mtimeMs > Date.parse(idbSavedAt))) return null;
+    const parsed = JSON.parse(
+      await fs.promises.readFile(storePath(), 'utf8'),
+    ) as Store & { fallbackSavedAt?: string };
+    // Only writes from a failed save carry this marker.
+    if (
+      !isStore(parsed) ||
+      !shouldImportFallback(stat.mtimeMs, idbSavedAt, parsed.fallbackSavedAt)
+    ) {
+      return null;
+    }
+    delete parsed.fallbackSavedAt;
+    return parsed;
+  } catch {
+    return null;
+  }
+}
+
+async function apiKey(): Promise<string> {
   if (memoryKey) return memoryKey;
   const config = readAiConfig();
-  if (!config.keyEncrypted || !safeStorage.isEncryptionAvailable()) return '';
+  if (!config.keyEncrypted) return '';
   try {
-    return safeStorage.decryptString(
+    if (!(await safeStorage.isAsyncEncryptionAvailable())) return '';
+    const { result } = await safeStorage.decryptStringAsync(
       Buffer.from(config.keyEncrypted, 'base64'),
     );
+    return result;
   } catch {
     return '';
   }
 }
 
-function aiStatus(): AiConfig {
+async function aiStatus(): Promise<AiConfig> {
   const config = readAiConfig();
-  const key = apiKey();
+  const key = await apiKey();
   const local = localSttSource(config.sttSource);
   return {
     // shortcut: one flag covers chat + STT, so a Whisper-only local server
@@ -239,7 +321,8 @@ function aiStatus(): AiConfig {
     sttModel: config.sttModel,
     sttLanguage: config.sttLanguage,
     keyStored:
-      Boolean(config.keyEncrypted) && safeStorage.isEncryptionAvailable(),
+      Boolean(config.keyEncrypted) &&
+      (await safeStorage.isAsyncEncryptionAvailable()),
   };
 }
 
@@ -267,7 +350,7 @@ async function postJson(
 
 async function complete(req: AiCompleteRequest): Promise<{ text: string }> {
   const config = readAiConfig();
-  const key = apiKey();
+  const key = await apiKey();
   if (!key && !isLocalEndpoint(config.baseUrl))
     throw new Error(
       'No API key configured. Add one in Settings → Intelligence.',
@@ -348,7 +431,7 @@ async function transcribe(req: TranscribeRequest): Promise<{ text: string }> {
       ),
     };
   }
-  const key = apiKey();
+  const key = await apiKey();
   if (!key && !isLocalEndpoint(config.baseUrl))
     throw new Error(
       'No API key configured. Add one in Settings → Intelligence.',
@@ -458,30 +541,34 @@ function writeCalendar(record: CalendarRecord): void {
   }
 }
 
-function encryptSecret(value: string): string {
-  if (!safeStorage.isEncryptionAvailable()) {
+async function encryptSecret(value: string): Promise<string> {
+  if (!(await safeStorage.isAsyncEncryptionAvailable())) {
     throw new Error(
       'The OS keychain is unavailable, so calendar access cannot be stored safely.',
     );
   }
-  return safeStorage.encryptString(value).toString('base64');
+  return (await safeStorage.encryptStringAsync(value)).toString('base64');
 }
 
-function decryptSecret(value?: string): string {
-  if (!value || !safeStorage.isEncryptionAvailable()) return '';
+async function decryptSecret(value?: string): Promise<string> {
+  if (!value) return '';
   try {
-    return safeStorage.decryptString(Buffer.from(value, 'base64'));
+    if (!(await safeStorage.isAsyncEncryptionAvailable())) return '';
+    const { result } = await safeStorage.decryptStringAsync(
+      Buffer.from(value, 'base64'),
+    );
+    return result;
   } catch {
     return '';
   }
 }
 
-function calendarStatus(): CalendarStatus {
+async function calendarStatus(): Promise<CalendarStatus> {
   const record = readCalendar();
   return {
     connected: Boolean(
       record?.refreshTokenEncrypted &&
-      decryptSecret(record.refreshTokenEncrypted),
+      (await decryptSecret(record.refreshTokenEncrypted)),
     ),
     provider: record?.provider ?? null,
     email: record?.email ?? '',
@@ -699,9 +786,9 @@ async function connectCalendar(req: CalendarConnectRequest): Promise<void> {
     provider,
     clientId,
     clientSecretEncrypted: clientSecret
-      ? encryptSecret(clientSecret)
+      ? await encryptSecret(clientSecret)
       : undefined,
-    refreshTokenEncrypted: encryptSecret(tokens.refresh_token),
+    refreshTokenEncrypted: await encryptSecret(tokens.refresh_token),
     email: profile.email,
     name: profile.name,
     connectedAt: new Date().toISOString(),
@@ -723,7 +810,7 @@ async function calendarToken(record: CalendarRecord): Promise<string> {
   ) {
     return calendarTokenCache.token;
   }
-  const refresh = decryptSecret(record.refreshTokenEncrypted);
+  const refresh = await decryptSecret(record.refreshTokenEncrypted);
   if (!refresh) {
     throw new Error('Calendar access expired. Reconnect in Settings.');
   }
@@ -733,7 +820,7 @@ async function calendarToken(record: CalendarRecord): Promise<string> {
     refresh_token: refresh,
   });
   if (record.provider === 'google') {
-    const secret = decryptSecret(record.clientSecretEncrypted);
+    const secret = await decryptSecret(record.clientSecretEncrypted);
     if (secret) body.set('client_secret', secret);
   } else {
     body.set('scope', OAUTH.microsoft.scope);
@@ -821,7 +908,7 @@ async function fetchCalendarEvents(): Promise<CalendarEvent[]> {
   }
 }
 
-function disconnectCalendar(): CalendarStatus {
+async function disconnectCalendar(): Promise<CalendarStatus> {
   try {
     fs.rmSync(calendarPath(), { force: true });
   } catch {
@@ -959,16 +1046,62 @@ function startShareServer(): void {
 }
 
 function registerIpc(): void {
-  ipcMain.handle('store:load', () => storeCache);
+  ipcMain.handle('store:load', async () => {
+    // Proxy to renderer which owns IndexedDB
+    for (const window of BrowserWindow.getAllWindows()) {
+      try {
+        await migrateStoreIfNeeded(window);
+        // A newer store.json means the last save could only reach the JSON
+        // fallback (frame disposed, app quitting). Import it instead of losing it.
+        const idbSavedAt = await rendererEval<string>(
+          window,
+          'window.liltDb.lastSavedAt()',
+        );
+        const fallback = await newerJsonStore(idbSavedAt);
+        if (fallback) {
+          await rendererEval<void>(
+            window,
+            `window.liltDb.saveStore(${JSON.stringify(fallback)})`,
+          );
+          storeCache = fallback;
+          return fallback;
+        }
+        const loaded = await rendererEval<Store>(
+          window,
+          'window.liltDb.loadStore()',
+        );
+        storeCache = loaded;
+        return loaded;
+      } catch (error) {
+        console.error('Renderer load failed:', error);
+      }
+    }
+    // Fallback to memory cache
+    return storeCache;
+  });
+
   ipcMain.handle('store:save', async (_event, next: Store) => {
     if (!isStore(next)) throw new Error('Refusing to save an invalid store');
-    return { savedAt: await writeStore(next) };
+    // Proxy to renderer
+    for (const window of BrowserWindow.getAllWindows()) {
+      try {
+        await rendererEval<void>(
+          window,
+          `window.liltDb.saveStore(${JSON.stringify(next)})`,
+        );
+        storeCache = next;
+        return { savedAt: new Date().toISOString() };
+      } catch (error) {
+        console.error('Renderer save failed:', error);
+      }
+    }
+    return { savedAt: await writeStore(next, true) };
   });
 
   ipcMain.handle('ai:config', () => aiStatus());
   ipcMain.handle(
     'ai:set-config',
-    (
+    async (
       _event,
       next: {
         baseUrl: string;
@@ -1000,10 +1133,10 @@ function registerIpc(): void {
         if (next.apiKey.length === 0) {
           delete config.keyEncrypted;
           memoryKey = '';
-        } else if (safeStorage.isEncryptionAvailable()) {
-          config.keyEncrypted = safeStorage
-            .encryptString(next.apiKey)
-            .toString('base64');
+        } else if (await safeStorage.isAsyncEncryptionAvailable()) {
+          config.keyEncrypted = (
+            await safeStorage.encryptStringAsync(next.apiKey)
+          ).toString('base64');
           memoryKey = '';
         } else {
           memoryKey = next.apiKey;
@@ -1038,10 +1171,22 @@ function registerIpc(): void {
     'calendar:connect',
     async (_event, req: CalendarConnectRequest) => {
       await connectCalendar(req);
-      return calendarStatus();
+      const status = await calendarStatus();
+      if (status.connected) {
+        for (const window of BrowserWindow.getAllWindows()) {
+          window.webContents.send('calendar:status-changed', true);
+        }
+      }
+      return status;
     },
   );
-  ipcMain.handle('calendar:disconnect', () => disconnectCalendar());
+  ipcMain.handle('calendar:disconnect', async () => {
+    const status = await disconnectCalendar();
+    for (const window of BrowserWindow.getAllWindows()) {
+      window.webContents.send('calendar:status-changed', false);
+    }
+    return status;
+  });
   ipcMain.handle('calendar:events', () => fetchCalendarEvents());
 
   ipcMain.handle('share:url', (_event, token: string) => {
@@ -1053,6 +1198,28 @@ function registerIpc(): void {
     await shell.openExternal(
       `http://127.0.0.1:${sharePort}/s/${encodeURIComponent(token)}`,
     );
+  });
+
+  ipcMain.handle('meeting:set-enabled', (_event, enabled: boolean) => {
+    setMeetingDetection(Boolean(enabled));
+  });
+
+  registerAudioRetentionIpc();
+}
+
+let meetingPollingCleanup: (() => void) | null = null;
+
+function setMeetingDetection(enabled: boolean): void {
+  if (!enabled) {
+    meetingPollingCleanup?.();
+    meetingPollingCleanup = null;
+    return;
+  }
+  if (meetingPollingCleanup) return;
+  meetingPollingCleanup = startMeetingPolling(fetchCalendarEvents, (event) => {
+    for (const window of BrowserWindow.getAllWindows()) {
+      window.webContents.send('meeting:detected', event);
+    }
   });
 }
 
@@ -1099,6 +1266,9 @@ function createWindow(): void {
 app.whenReady().then(async () => {
   if (!hasLock) return;
   fs.mkdirSync(dataDir(), { recursive: true });
+
+  // Cache the JSON store for main-process handlers until the renderer loads
+  // IndexedDB through store:load.
   try {
     storeCache = await readStore();
   } catch (error) {
@@ -1111,7 +1281,7 @@ app.whenReady().then(async () => {
   }
   registerIpc();
   startShareServer();
-  for (const file of [storePath(), aiConfigPath(), calendarPath()]) {
+  for (const file of [aiConfigPath(), calendarPath()]) {
     try {
       fs.chmodSync(file, 0o600);
     } catch {

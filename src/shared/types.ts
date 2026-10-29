@@ -37,6 +37,8 @@ export interface Segment {
   text: string;
   startMs: number;
   endMs: number;
+  speakerConfidence: number | null;
+  voicePrintId: string | null;
 }
 
 export interface SourceRef {
@@ -166,6 +168,9 @@ export interface Settings {
   includeSystemAudio: boolean;
   sttLanguage: string;
   autoEnhance: boolean;
+  vadSensitivity: number;
+  autoStartMeetingRecording: boolean;
+  meetingDetectionEnabled: boolean;
 }
 
 export interface Store {
@@ -262,5 +267,40 @@ export interface Api {
   shareUrl(token: string): Promise<string>;
   openShare(token: string): Promise<void>;
   onSuspend(cb: () => void): () => void;
+  setMeetingDetectionEnabled(enabled: boolean): Promise<void>;
+  onMeetingDetected(cb: (event: CalendarEvent) => void): () => void;
+  audioRetention: {
+    writePending(data: {
+      noteId: string;
+      source: 'mic' | 'system';
+      arrayBuffer: ArrayBuffer;
+      startMs: number;
+      endMs: number;
+      speechStartMs: number;
+      speechEndMs: number;
+      baseMs: number;
+      language: string;
+      prompt?: string;
+    }): Promise<string>;
+    readPending(): Promise<
+      Array<{
+        noteId: string;
+        source: 'mic' | 'system';
+        filePath: string;
+        startMs: number;
+        endMs: number;
+        speechStartMs: number;
+        speechEndMs: number;
+        baseMs: number;
+        language: string;
+        prompt?: string;
+        attempts: number;
+        createdAt: string;
+      }>
+    >;
+    readChunk(filePath: string): Promise<ArrayBuffer>;
+    deletePending(filePath: string): Promise<void>;
+    incrementAttempts(filePath: string): Promise<void>;
+  };
   platform: string;
 }

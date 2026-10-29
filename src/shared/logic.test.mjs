@@ -1,5 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import path from 'node:path';
 import {
   calendarEventKey,
   chunkEndedByPause,
@@ -8,18 +9,23 @@ import {
   folderDescendants,
   folderPath,
   isLocalEndpoint,
+  isMeetingWindowTitle,
   LOCAL_STT_MODELS,
   localAnswer,
   localEnhance,
   localSttSource,
   mergeSegment,
+  mergeSettings,
   parseAttendees,
   parseEnhancedResponse,
+  pickActiveMeeting,
   retrieve,
   sanitizeSharedNote,
   searchNotes,
-  segmentFromChunk,
   sharedNoteFor,
+  shouldImportFallback,
+  speechFloorFor,
+  SPEECH_FLOOR,
   speechWindow,
   toCsv,
   trimPcm,
@@ -29,6 +35,7 @@ import {
   verifyQuote,
   visibleNotes,
 } from './logic.ts';
+import { isPendingChunkPath } from './pending-path.ts';
 import { createSeed } from './seed.ts';
 
 const NOW = Date.now();
@@ -115,6 +122,14 @@ test('a chunk ends only after real speech is followed by a pause', () => {
   assert.equal(chunkEndedByPause(1000, 3000, 3800), true);
 });
 
+test('the sensitivity setting moves the speech floor both ways', () => {
+  assert.equal(speechFloorFor(0.5), SPEECH_FLOOR);
+  assert.ok(speechFloorFor(1) < SPEECH_FLOOR);
+  assert.ok(speechFloorFor(0) > SPEECH_FLOOR);
+  assert.equal(speechFloorFor(2), speechFloorFor(1));
+  assert.equal(speechFloorFor(-1), speechFloorFor(0));
+});
+
 test('trimming keeps the samples inside the speech window', () => {
   const pcm = new Float32Array(16).map((_, index) => index);
   assert.deepEqual(
@@ -169,12 +184,77 @@ test('share links stay private when revoked, trashed or unknown', () => {
   assert.equal(sharedNoteFor(store.notes, 'tok-legacy'), null);
 });
 
-test('segment timestamps are offset by the recording base', () => {
-  const segment = segmentFromChunk('mic', 'hello', 1_000, 2_000, 60_000);
-  assert.equal(segment.startMs, 61_000);
-  assert.equal(segment.endMs, 62_000);
-  assert.equal(segment.speaker, 'Me');
-  assert.equal(segmentFromChunk('system', 'hi', 0, 500, 0).speaker, 'Them');
+test('settings saved by an older version pick up new defaults', () => {
+  const merged = mergeSettings({ notifications: false, sttLanguage: 'de' });
+  assert.equal(merged.notifications, false);
+  assert.equal(merged.sttLanguage, 'de');
+  assert.equal(merged.vadSensitivity, 0.5);
+  assert.equal(merged.meetingDetectionEnabled, true);
+  assert.equal(merged.autoStartMeetingRecording, false);
+  assert.deepEqual(mergeSettings(undefined), mergeSettings({}));
+});
+
+test('only a calendar meeting in progress with a join link is active', () => {
+  const now = Date.parse('2026-10-27T12:00:00.000Z');
+  const minutes = (value) => new Date(now + value * 60_000).toISOString();
+  const calendar = [
+    {
+      title: 'Standup',
+      start: minutes(-5),
+      end: minutes(25),
+      meetingUrl: 'https://zoom.us/j/1',
+      attendees: [],
+    },
+    {
+      title: 'Focus time',
+      start: minutes(-5),
+      end: minutes(25),
+      attendees: [],
+    },
+    {
+      title: 'Later',
+      start: minutes(60),
+      end: minutes(90),
+      meetingUrl: 'https://zoom.us/j/2',
+      attendees: [],
+    },
+  ];
+  assert.equal(pickActiveMeeting(calendar, now)?.title, 'Standup');
+  assert.equal(pickActiveMeeting(calendar.slice(1), now), null);
+  assert.equal(pickActiveMeeting([], now), null);
+});
+
+test('window titles need a known call app, not a stray word', () => {
+  assert.equal(isMeetingWindowTitle('Zoom Meeting'), true);
+  assert.equal(isMeetingWindowTitle('Microsoft Teams'), true);
+  assert.equal(isMeetingWindowTitle('Google Meet - Chrome'), true);
+  assert.equal(isMeetingWindowTitle('Team meetup notes - Slack'), false);
+  assert.equal(isMeetingWindowTitle('Discord'), false);
+  assert.equal(isMeetingWindowTitle('around the office'), false);
+});
+
+test('retention only touches this app its own temp files', () => {
+  const temp = path.join('/tmp', 'lilt-chunks');
+  const chunk = path.join(temp, 'lilt-chunk-abc-mic.webm');
+  assert.equal(isPendingChunkPath(temp, chunk), true);
+  assert.equal(
+    isPendingChunkPath(temp, path.join(temp, 'lilt-chunk-abc-mic.json')),
+    true,
+  );
+  assert.equal(isPendingChunkPath(temp, '/home/you/.ssh/id_rsa'), false);
+  assert.equal(isPendingChunkPath(temp, path.join(temp, 'other.webm')), false);
+  assert.equal(
+    isPendingChunkPath(temp, path.join(temp, '..', 'secret.webm')),
+    false,
+  );
+  assert.equal(
+    isPendingChunkPath(
+      temp,
+      path.join('/tmp', 'lilt-chunks-evil', 'lilt-chunk-x.webm'),
+    ),
+    false,
+  );
+  assert.equal(isPendingChunkPath(temp, temp), false);
 });
 
 test('segments merge only when same source, close and short', () => {
@@ -208,6 +288,31 @@ test('segments merge only when same source, close and short', () => {
   assert.equal(list[0].text, 'hello there this is a test');
   list = mergeSegment(list, c);
   assert.equal(list.length, 2);
+});
+
+test('segments from different speakers never merge', () => {
+  const first = {
+    id: 'a',
+    source: 'system',
+    speaker: 'Speaker A',
+    text: 'first point',
+    startMs: 0,
+    endMs: 1000,
+  };
+  const next = {
+    id: 'b',
+    source: 'system',
+    speaker: 'Speaker B',
+    text: 'second point',
+    startMs: 1000,
+    endMs: 2000,
+  };
+  const list = mergeSegment(mergeSegment([], first), next);
+  assert.equal(list.length, 2);
+  assert.deepEqual(
+    list.map((segment) => segment.speaker),
+    ['Speaker A', 'Speaker B'],
+  );
 });
 
 test('provenance verifies quotes against raw notes and transcript only', () => {
@@ -498,4 +603,27 @@ test('a reminder fires once for a meeting starting within a minute with 2+ atten
     null,
   );
   assert.equal(dueReminder([meeting], now + 120_000, new Set()), null);
+});
+
+test('the JSON fallback only wins when a failed save is newer than IndexedDB', () => {
+  const idb = '2026-10-26T10:00:00.000Z';
+  const idbMs = Date.parse(idb);
+  assert.equal(
+    shouldImportFallback(idbMs + 1000, idb, '2026-10-26T10:00:00.500Z'),
+    true,
+  );
+  // Startup seed and migrated JSON carry no marker.
+  assert.equal(shouldImportFallback(idbMs + 1000, idb, undefined), false);
+  // A later IndexedDB commit already holds newer data.
+  assert.equal(
+    shouldImportFallback(idbMs + 1000, idb, '2026-10-26T09:59:00.000Z'),
+    false,
+  );
+  // File not rewritten after the commit.
+  assert.equal(
+    shouldImportFallback(idbMs - 1000, idb, '2026-10-26T10:00:00.500Z'),
+    false,
+  );
+  // Garbage timestamps never win.
+  assert.equal(shouldImportFallback(idbMs + 1000, idb, 'nope'), false);
 });

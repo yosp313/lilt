@@ -1,5 +1,5 @@
 import type { Note, Segment, SourceRef, Store, Template } from './types.ts';
-import { randomId, verifyQuote } from './logic.ts';
+import { DEFAULT_SETTINGS, randomId, verifyQuote } from './logic.ts';
 
 const MINUTE = 60_000;
 const HOUR = 60 * MINUTE;
@@ -18,6 +18,8 @@ function segment(
     text,
     startMs: startMin * MINUTE,
     endMs: endMin * MINUTE,
+    speakerConfidence: null,
+    voicePrintId: null,
   };
 }
 
@@ -599,11 +601,6 @@ export function createSeed(): Store {
       },
     ],
     threads: [],
-    settings: {
-      notifications: true,
-      includeSystemAudio: true,
-      sttLanguage: 'en',
-      autoEnhance: true,
-    },
+    settings: { ...DEFAULT_SETTINGS },
   };
 }

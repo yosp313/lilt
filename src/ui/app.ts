@@ -40,7 +40,6 @@ import {
   relativeDate,
   retrieve,
   searchNotes,
-  segmentFromChunk,
   toCsv,
   trimPcm,
   truncate,
@@ -141,6 +140,8 @@ let recordingNoteId: ID | null = null;
 let recordingBaseMs = 0;
 let pendingTranscriptions = 0;
 let listRenderTimer: number | null = null;
+let detectedMeeting: CalendarEvent | null = null;
+let meetingBannerDismissed = false;
 
 interface ChunkJob {
   noteId: ID;
@@ -150,6 +151,8 @@ interface ChunkJob {
   startMs: number;
   endMs: number;
   speech: SpeechWindow;
+  /** Temp file written when the chunk was queued, deleted once transcribed. */
+  pendingPath: string | null;
 }
 
 const busySources = new Set<'mic' | 'system'>();
@@ -376,12 +379,12 @@ async function sendChat(): Promise<void> {
 // ---------------------------------------------------------------------------
 
 function createCapture(): Capture {
-  return new Capture(
+  const capture = new Capture(
     {
       onLevel: updateMeters,
       onChunk: (source, blob, start, end, speech) => {
         if (!recordingNoteId) return;
-        queueChunk({
+        void queueChunk({
           noteId: recordingNoteId,
           baseMs: recordingBaseMs,
           source,
@@ -389,6 +392,7 @@ function createCapture(): Capture {
           startMs: start,
           endMs: end,
           speech,
+          pendingPath: null,
         });
       },
       onState: handleCaptureState,
@@ -400,6 +404,8 @@ function createCapture(): Capture {
     },
     () => (ui.ai.sttSource === 'cloud' ? 7000 : LOCAL_CHUNK_MS),
   );
+  capture.setSensitivity(ui.db.settings.vadSensitivity ?? 0.5);
+  return capture;
 }
 
 function updateMeters(me: number, them: number): void {
@@ -529,7 +535,27 @@ async function stopRecording(): Promise<void> {
   if (capture?.isRunning) await capture.stop();
 }
 
-function queueChunk(job: ChunkJob): void {
+async function persistPendingChunk(job: ChunkJob): Promise<string | null> {
+  try {
+    return await window.api.audioRetention.writePending({
+      noteId: job.noteId,
+      source: job.source,
+      arrayBuffer: await job.blob.arrayBuffer(),
+      startMs: job.startMs,
+      endMs: job.endMs,
+      speechStartMs: job.speech.startMs,
+      speechEndMs: job.speech.endMs,
+      baseMs: job.baseMs,
+      language: ui.db.settings.sttLanguage,
+      prompt: sttPrompt(noteById(job.noteId)),
+    });
+  } catch (error) {
+    console.error('Failed to write pending chunk:', error);
+    return null;
+  }
+}
+
+async function queueChunk(job: ChunkJob): Promise<void> {
   if (!ui.ai.sttReady) {
     if (!ui.sttWarned) {
       ui.sttWarned = true;
@@ -543,12 +569,11 @@ function queueChunk(job: ChunkJob): void {
     return;
   }
   pendingTranscriptions += 1;
+  // The temp copy is what survives a quit or a crash before transcription.
+  job.pendingPath = await persistPendingChunk(job);
   const queue = queuedChunks.get(job.source) ?? [];
   queue.push(job);
   queuedChunks.set(job.source, queue);
-  // shortcut: whole chunks wait in memory, so a provider that never catches up
-  // grows the backlog instead of dropping audio; move to a disk queue if a
-  // meeting ever outlasts available memory.
   if (!busySources.has(job.source)) void runChunks(job.source);
 }
 
@@ -579,15 +604,20 @@ async function transcribeChunk(job: ChunkJob): Promise<void> {
       local
         ? { pcm, language: ui.db.settings.sttLanguage, prompt }
         : {
-            // Silence was already cut, so WAV is the honest container to send.
             data: encodeWav(pcm).buffer,
             mime: 'audio/wav',
             language: ui.db.settings.sttLanguage,
             prompt,
           },
     );
+    // The provider took the audio (empty text included), so nothing to retry.
+    if (job.pendingPath) {
+      await window.api.audioRetention.deletePending(job.pendingPath);
+      job.pendingPath = null;
+    }
     const note = noteById(job.noteId);
     if (!note || !text.trim()) return;
+
     addTranscriptSegment(
       note,
       job.source,
@@ -598,11 +628,24 @@ async function transcribeChunk(job: ChunkJob): Promise<void> {
     );
   } catch (error) {
     console.error(error);
+    // Keep a temp copy for retry when the queue-time write failed.
+    if (!job.pendingPath) job.pendingPath = await persistPendingChunk(job);
+
     if (!ui.sttWarned) {
       ui.sttWarned = true;
-      ui.sttError =
-        'Transcription failed. Check the provider key and model in Settings → Intelligence. No audio was saved.';
-      toast('Transcription failed. No audio was kept.');
+      const message = error instanceof Error ? error.message : '';
+      const unreachable =
+        /fetch failed|ETIMEDOUT|ENOTFOUND|ECONNREFUSED|ECONNRESET/i.test(
+          message,
+        );
+      ui.sttError = unreachable
+        ? 'Could not reach the transcription server. Check your connection, the base URL, or switch to a local model in Settings → Intelligence. Audio saved for retry.'
+        : 'Transcription failed. Check the provider key and model in Settings → Intelligence. Audio saved for retry.';
+      toast(
+        unreachable
+          ? 'Transcription server unreachable. Audio saved for retry on restart.'
+          : 'Transcription failed. Audio saved for retry on restart.',
+      );
       if (ui.view.name === 'note') renderMain();
     }
   }
@@ -625,22 +668,11 @@ function sttPrompt(note: Note | null): string | undefined {
 
 /** Chromium decodes the recorder's webm/opus; Whisper wants 16 kHz mono PCM. */
 async function blobToPcm(blob: Blob): Promise<Float32Array> {
-  const context = new AudioContext();
-  try {
-    const decoded = await context.decodeAudioData(await blob.arrayBuffer());
-    const offline = new OfflineAudioContext(
-      1,
-      Math.max(1, Math.ceil(decoded.duration * 16000)),
-      16000,
-    );
-    const source = offline.createBufferSource();
-    source.buffer = decoded;
-    source.connect(offline.destination);
-    source.start();
-    return (await offline.startRendering()).getChannelData(0);
-  } finally {
-    void context.close();
-  }
+  // Offline context: decodes and resamples to 16 kHz without opening an audio
+  // output device (a realtime AudioContext needs one).
+  const context = new OfflineAudioContext(1, 1, 16000);
+  const decoded = await context.decodeAudioData(await blob.arrayBuffer());
+  return decoded.getChannelData(0);
 }
 
 function addTranscriptSegment(
@@ -650,14 +682,20 @@ function addTranscriptSegment(
   startMs: number,
   endMs: number,
   baseMs: number,
+  speaker?: string,
+  speakerConfidence?: number | null,
+  voicePrintId?: string | null,
 ): void {
-  const segment: Segment = segmentFromChunk(
+  const segment: Segment = {
+    id: crypto.randomUUID(),
     source,
+    speaker: speaker ?? (source === 'mic' ? 'Me' : 'Them'),
     text,
-    startMs,
-    endMs,
-    baseMs,
-  );
+    startMs: baseMs + startMs,
+    endMs: baseMs + endMs,
+    speakerConfidence: speakerConfidence ?? null,
+    voicePrintId: voicePrintId ?? null,
+  };
   const sorted = [...note.transcript, segment].sort(
     (a, b) => a.startMs - b.startMs,
   );
@@ -801,6 +839,92 @@ function reminderView(): Html {
       <button class="text-btn" data-act="dismiss-reminder">Dismiss</button>
     </div>
   </div>`;
+}
+
+function renderMeetingBanner(): void {
+  mount(
+    document.getElementById('meeting-banner-root'),
+    detectedMeeting && !meetingBannerDismissed ? meetingBannerView() : html``,
+  );
+}
+
+function meetingBannerView(): Html {
+  if (!detectedMeeting) return html``;
+  const isCalendarEvent = Boolean(detectedMeeting.meetingUrl);
+  return html`<div class="meeting-banner" role="status" aria-live="polite">
+    <div class="meeting-banner-head">
+      ${icon('calendar', 13)}
+      <span
+        >${isCalendarEvent ? 'Calendar meeting detected' : 'Call detected'}</span
+      >
+      <button
+        class="icon-btn"
+        data-act="dismiss-meeting-banner"
+        title="Dismiss"
+      >
+        ${icon('x', 14)}
+      </button>
+    </div>
+    <strong class="meeting-banner-title">${detectedMeeting.title}</strong>
+    ${detectedMeeting.meetingUrl ? html`<span class="meeting-banner-meta">${icon('external', 12)} ${detectedMeeting.meetingUrl}</span>` : ''}
+    ${detectedMeeting.attendees.length ? html`<span class="meeting-banner-meta">${icon('people', 12)} ${detectedMeeting.attendees.slice(0, 3).join(', ')}${detectedMeeting.attendees.length > 3 ? ` +${detectedMeeting.attendees.length - 3}` : ''}</span>` : ''}
+    <div class="meeting-banner-actions">
+      <button class="primary-btn small" data-act="start-meeting-notes">
+        ${icon('mic', 12)} Start notes
+      </button>
+      <button class="text-btn" data-act="dismiss-meeting-banner">
+        Dismiss
+      </button>
+    </div>
+  </div>`;
+}
+
+function dismissMeetingBanner(): void {
+  meetingBannerDismissed = true;
+  detectedMeeting = null;
+  renderMeetingBanner();
+}
+
+let handledMeetingKey: string | null = null;
+
+function handleMeetingDetected(event: CalendarEvent): void {
+  if (
+    !ui.db.settings.meetingDetectionEnabled &&
+    !ui.db.settings.autoStartMeetingRecording
+  ) {
+    return;
+  }
+  const key = event.id ?? `${event.title}@${event.start}`;
+  if (key === handledMeetingKey) return;
+  handledMeetingKey = key;
+
+  if (
+    ui.db.settings.autoStartMeetingRecording &&
+    (event.id || event.meetingUrl)
+  ) {
+    const existing = eventNote(event);
+    if (!capture.isRunning && (!existing || existing.status === 'draft')) {
+      const note = existing ?? createNoteFromEvent(event);
+      openNote(note.id);
+      void startRecording(note);
+    }
+    return;
+  }
+
+  detectedMeeting = event;
+  meetingBannerDismissed = false;
+  renderMeetingBanner();
+}
+
+async function startMeetingNotesFromBanner(): Promise<void> {
+  if (!detectedMeeting) return;
+  const note =
+    eventNote(detectedMeeting) ?? createNoteFromEvent(detectedMeeting);
+  openNote(note.id);
+  if (!capture.isRunning) await startRecording(note);
+  if (detectedMeeting.meetingUrl)
+    window.open(detectedMeeting.meetingUrl, '_blank');
+  dismissMeetingBanner();
 }
 
 const eventByKey = (key: string | undefined) =>
@@ -1393,10 +1517,18 @@ async function saveSettings(form: HTMLFormElement): Promise<void> {
   ui.db.settings.includeSystemAudio = data.get('includeSystemAudio') === 'on';
   ui.db.settings.autoEnhance = data.get('autoEnhance') === 'on';
   ui.db.settings.notifications = data.get('notifications') === 'on';
+  ui.db.settings.meetingDetectionEnabled =
+    data.get('meetingDetectionEnabled') === 'on';
+  ui.db.settings.autoStartMeetingRecording =
+    data.get('autoStartMeetingRecording') === 'on';
+  ui.db.settings.vadSensitivity = Number(data.get('vadSensitivity') ?? 0.5);
   ui.db.settings.sttLanguage = String(data.get('sttLanguage') ?? 'en');
   ui.db.user.name =
     String(data.get('userName') ?? ui.db.user.name).trim() || ui.db.user.name;
   persist();
+  window.api
+    .setMeetingDetectionEnabled(ui.db.settings.meetingDetectionEnabled)
+    .catch(() => {});
   try {
     const apiKey = String(data.get('apiKey') ?? '').trim();
     ui.ai = await window.api.setAiConfig({
@@ -1974,6 +2106,9 @@ function renderAll(): void {
       </div>
       <div id="modal-root">${modalView()}</div>
       <div id="reminder-root">${reminder ? reminderView() : ''}</div>
+      <div id="meeting-banner-root">
+        ${detectedMeeting && !meetingBannerDismissed ? meetingBannerView() : ''}
+      </div>
       <div id="toast-root">${toastView()}</div>`,
   );
   afterRender();
@@ -3288,7 +3423,7 @@ function settingsView(): Html {
             <span
               ><strong>Capture system audio by default</strong
               ><small
-                >Shared system audio is transcribed as “Them”. You can change
+                >Shared system audio is transcribed as "Them". You can change
                 this on every start.</small
               ></span
             >
@@ -3321,7 +3456,54 @@ function settingsView(): Html {
               ></span
             >
           </label>
+          <label class="toggle">
+            <input
+              type="checkbox"
+              name="meetingDetectionEnabled"
+              ${ui.db.settings.meetingDetectionEnabled ? raw('checked') : ''}
+            />
+            <span
+              ><strong>Auto-detect meetings</strong
+              ><small
+                >Shows a banner when a calendar meeting starts or a call window
+                (Zoom/Teams/Meet) is active.</small
+              ></span
+            >
+          </label>
+          <label class="toggle">
+            <input
+              type="checkbox"
+              name="autoStartMeetingRecording"
+              ${ui.db.settings.autoStartMeetingRecording ? raw('checked') : ''}
+            />
+            <span
+              ><strong>Auto-start recording for detected meetings</strong
+              ><small
+                >When a meeting is detected and this is on, Lilt creates a note
+                and starts recording automatically.</small
+              ></span
+            >
+          </label>
         </div>
+        <label class="field">
+          <span>VAD sensitivity</span>
+          <input
+            type="range"
+            name="vadSensitivity"
+            data-change="vad-sensitivity"
+            min="0"
+            max="1"
+            step="0.05"
+            value="${ui.db.settings.vadSensitivity ?? 0.5}"
+          />
+          <span class="range-value"
+            >${Math.round((ui.db.settings.vadSensitivity ?? 0.5) * 100)}%</span
+          >
+          <small
+            >Higher = more sensitive to quiet speech. Uses the level of each
+            recording, so it applies immediately.</small
+          >
+        </label>
       </section>
 
       <div class="settings-save">
@@ -4672,6 +4854,12 @@ function onClick(event: MouseEvent): void {
         'delete-all',
       );
       return;
+    case 'dismiss-meeting-banner':
+      dismissMeetingBanner();
+      return;
+    case 'start-meeting-notes':
+      void startMeetingNotesFromBanner();
+      return;
     default:
       return;
   }
@@ -4831,6 +5019,16 @@ function onChange(event: Event): void {
     const thread = ui.db.threads.find((entry) => entry.id === ui.threadId);
     if (thread) thread.model = ui.chatModel;
     persist();
+    return;
+  }
+
+  if (kind === 'vad-sensitivity' && target instanceof HTMLInputElement) {
+    ui.db.settings.vadSensitivity = Number(target.value);
+    if (capture) capture.setSensitivity(ui.db.settings.vadSensitivity);
+    persist();
+    const valueEl = target.parentElement?.querySelector('.range-value');
+    if (valueEl)
+      valueEl.textContent = `${Math.round(ui.db.settings.vadSensitivity * 100)}%`;
     return;
   }
 
@@ -5036,6 +5234,78 @@ function attachEvents(): void {
 // Boot
 // ---------------------------------------------------------------------------
 
+async function retryPendingChunks(): Promise<void> {
+  if (!ui.ai.sttReady) return;
+
+  const pendingChunks = await window.api.audioRetention.readPending();
+  if (pendingChunks.length === 0) return;
+
+  toast(
+    `${pendingChunks.length} audio chunk${pendingChunks.length > 1 ? 's' : ''} pending retry…`,
+  );
+
+  let remaining = 0;
+  for (const chunk of pendingChunks) {
+    const note = noteById(chunk.noteId);
+    // Three attempts, then give up instead of retrying on every launch.
+    if (!note || chunk.attempts >= 3) {
+      await window.api.audioRetention.deletePending(chunk.filePath);
+      continue;
+    }
+
+    try {
+      await window.api.audioRetention.incrementAttempts(chunk.filePath);
+
+      // Read the audio file via IPC
+      const arrayBuffer = await window.api.audioRetention.readChunk(
+        chunk.filePath,
+      );
+      const blob = new Blob([arrayBuffer], { type: 'audio/webm' });
+
+      // Decode to PCM
+      const pcm = trimPcm(await blobToPcm(blob), {
+        startMs: chunk.speechStartMs,
+        endMs: chunk.speechEndMs,
+      });
+
+      const local = ui.ai.sttSource !== 'cloud';
+      const { text } = await window.api.transcribe(
+        local
+          ? { pcm, language: chunk.language, prompt: chunk.prompt }
+          : {
+              data: encodeWav(pcm).buffer,
+              mime: 'audio/wav',
+              language: chunk.language,
+              prompt: chunk.prompt,
+            },
+      );
+
+      // Succeeded, even if the model heard silence: never retry this file.
+      await window.api.audioRetention.deletePending(chunk.filePath);
+      if (!text.trim()) continue;
+
+      addTranscriptSegment(
+        note,
+        chunk.source,
+        text.trim(),
+        chunk.startMs + chunk.speechStartMs,
+        chunk.startMs + chunk.speechEndMs,
+        chunk.baseMs,
+      );
+    } catch (error) {
+      remaining += 1;
+      console.error('Retry failed for chunk:', chunk.filePath, error);
+      // Keep for next launch.
+    }
+  }
+
+  if (remaining > 0) {
+    toast(
+      `${remaining} audio chunk${remaining > 1 ? 's' : ''} still pending retry. Check connection and try again.`,
+    );
+  }
+}
+
 async function boot(): Promise<void> {
   if (root) {
     root.innerHTML =
@@ -5088,6 +5358,10 @@ async function boot(): Promise<void> {
       ui.sttDownload = progress;
       updateSttSettings();
     });
+
+    // Retry pending transcriptions from previous session
+    void retryPendingChunks();
+
     renderAll();
     void refreshCalendar();
     window.setInterval(() => void refreshCalendar(), 5 * 60_000);
@@ -5098,6 +5372,12 @@ async function boot(): Promise<void> {
         void stopRecording();
       }
     });
+
+    // Meeting detection listener; main only polls while the setting is on.
+    window.api.onMeetingDetected(handleMeetingDetected);
+    void window.api
+      .setMeetingDetectionEnabled(ui.db.settings.meetingDetectionEnabled)
+      .catch(() => {});
   } catch (error) {
     console.error(error);
     if (root) {

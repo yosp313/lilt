@@ -1,5 +1,6 @@
 import {
   chunkEndedByPause,
+  speechFloorFor,
   speechWindow,
   SPEECH_FLOOR,
   type SpeechWindow,
@@ -38,13 +39,8 @@ interface SourceLoop {
 }
 
 const CHUNK_MS = 7000;
-// Chunks end at a pause; this is only the cap for unbroken speech. Local
-// models read a shorter window, so a capped chunk stays cheap.
 export const LOCAL_CHUNK_MS = 15_000;
-// shortcut: fixed HTTP chunks, not streaming partials. A WebSocket STT
-// provider (Deepgram/AssemblyAI) or whisper-stream is the upgrade path.
 const SILENCE_AFTER_MS = 15 * 60_000;
-// 2048 samples (~43 ms at 48 kHz) sampled every 50 ms: no audio goes unseen.
 const LEVEL_TICK_MS = 50;
 
 export class Capture {
@@ -60,6 +56,7 @@ export class Capture {
   private levelTimer: number | null = null;
   private silenceTimer: number | null = null;
   private stopping: Promise<void> | null = null;
+  private speechFloor = SPEECH_FLOOR;
 
   constructor(
     handlers: CaptureHandlers,
@@ -88,8 +85,6 @@ export class Capture {
     let mic: MediaStream;
     try {
       mic = await navigator.mediaDevices.getUserMedia({
-        // Raw-ish mic for ASR: AGC and noise suppression clip speech. Echo
-        // cancellation stays on so system audio is not transcribed twice.
         audio: {
           echoCancellation: true,
           noiseSuppression: false,
@@ -139,6 +134,10 @@ export class Capture {
     );
     this.silenceTimer = window.setInterval(() => this.checkSilence(), 5000);
     this.handlers.onState('recording');
+  }
+
+  setSensitivity(sensitivity: number): void {
+    this.speechFloor = speechFloorFor(sensitivity);
   }
 
   pause(): void {
@@ -249,7 +248,12 @@ export class Capture {
       loop.chunks = [];
       loop.recorder = null;
       const endMs = this.elapsedMs;
-      const speech = speechWindow(loop.frames, loop.chunkStart, endMs);
+      const speech = speechWindow(
+        loop.frames,
+        loop.chunkStart,
+        endMs,
+        this.speechFloor,
+      );
       loop.frames = [];
       if (blob.size > 1200 && speech) {
         this.handlers.onChunk(
@@ -272,7 +276,6 @@ export class Capture {
     if (loop.timer !== null) window.clearTimeout(loop.timer);
     loop.timer = null;
     if (loop.recorder?.state !== 'recording') return;
-    // onstop builds the blob and starts the next chunk.
     loop.recorder.stop();
   }
 
@@ -295,20 +298,19 @@ export class Capture {
       if (!this.paused) {
         const atMs = this.elapsedMs;
         loop.frames.push({ atMs, level });
-        if (level >= SPEECH_FLOOR) {
+        if (level >= this.speechFloor) {
           if (loop.speechStart === null) loop.speechStart = atMs;
           loop.lastLoud = atMs;
         } else if (chunkEndedByPause(loop.speechStart, loop.lastLoud, atMs)) {
-          // Flushing on the pause means the transcript arrives seconds after
-          // a thought ends, and each chunk starts and ends on a word boundary.
           this.flushChunk(loop);
         }
       }
       if (loop.source === 'mic') me = level;
       else them = level;
     }
-    if (me > SPEECH_FLOOR || them > SPEECH_FLOOR)
+    if (me >= this.speechFloor || them >= this.speechFloor) {
       this.lastLoudAt = this.elapsedMs;
+    }
     this.handlers.onLevel(me, them);
   }
 

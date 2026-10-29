@@ -2,6 +2,7 @@ import { contextBridge, ipcRenderer } from 'electron';
 import type {
   AiCompleteRequest,
   Api,
+  CalendarEvent,
   Store,
   SttProgress,
   TranscribeRequest,
@@ -35,6 +36,37 @@ const api: Api = {
     const listener = () => callback();
     ipcRenderer.on('power:suspend', listener);
     return () => ipcRenderer.removeListener('power:suspend', listener);
+  },
+  setMeetingDetectionEnabled: (enabled: boolean) =>
+    ipcRenderer.invoke('meeting:set-enabled', enabled) as Promise<void>,
+  onMeetingDetected: (callback: (event: CalendarEvent) => void) => {
+    const listener = (_event: unknown, event: CalendarEvent) => callback(event);
+    ipcRenderer.on('meeting:detected', listener);
+    return () => ipcRenderer.removeListener('meeting:detected', listener);
+  },
+  audioRetention: {
+    writePending: (data: {
+      noteId: string;
+      source: 'mic' | 'system';
+      arrayBuffer: ArrayBuffer;
+      startMs: number;
+      endMs: number;
+      speechStartMs: number;
+      speechEndMs: number;
+      baseMs: number;
+      language: string;
+      prompt?: string;
+    }) => ipcRenderer.invoke('audio-retention:write', data),
+    readPending: () => ipcRenderer.invoke('audio-retention:read-pending'),
+    readChunk: (filePath: string) =>
+      ipcRenderer.invoke(
+        'audio-retention:read-chunk',
+        filePath,
+      ) as Promise<ArrayBuffer>,
+    deletePending: (filePath: string) =>
+      ipcRenderer.invoke('audio-retention:delete', filePath),
+    incrementAttempts: (filePath: string) =>
+      ipcRenderer.invoke('audio-retention:increment-attempts', filePath),
   },
   platform: process.platform,
 };

@@ -11,7 +11,7 @@ import type {
   Segment,
   SharedNote,
   SourceRef,
-  SpeakerSource,
+  Settings,
   Store,
   SttSource,
   Template,
@@ -67,6 +67,22 @@ const STOPWORDS = new Set([
   'all',
   'not',
 ]);
+
+/** Settings a fresh install, or an older store.json, is upgraded to. */
+export const DEFAULT_SETTINGS: Settings = {
+  notifications: true,
+  includeSystemAudio: true,
+  sttLanguage: 'en',
+  autoEnhance: true,
+  vadSensitivity: 0.5,
+  autoStartMeetingRecording: false,
+  meetingDetectionEnabled: true,
+};
+
+/** Fill in settings added since this store was written. */
+export function mergeSettings(stored?: Partial<Settings> | null): Settings {
+  return { ...DEFAULT_SETTINGS, ...stored };
+}
 
 export function visibleNotes(store: Store): Note[] {
   return store.notes.filter((note) => !note.deletedAt);
@@ -636,6 +652,16 @@ export function localSttSource(value: string): LocalSttSource | null {
 
 /** Scaled RMS below this is room noise, above it is speech. */
 export const SPEECH_FLOOR = 0.006;
+
+/**
+ * The sensitivity slider (0–1) scales the speech floor: 0.5 keeps the default,
+ * higher values lower the floor so quieter speech counts.
+ */
+export function speechFloorFor(sensitivity: number): number {
+  const clamped = Math.max(0, Math.min(1, sensitivity));
+  return SPEECH_FLOOR * (1.5 - clamped);
+}
+
 const VAD_PAD_BEFORE_MS = 250;
 const VAD_PAD_AFTER_MS = 350;
 
@@ -659,6 +685,7 @@ export function speechWindow(
   frames: VadFrame[],
   chunkStartMs: number,
   chunkEndMs: number,
+  floor = SPEECH_FLOOR,
 ): SpeechWindow | null {
   const duration = chunkEndMs - chunkStartMs;
   if (duration <= 0) return null;
@@ -669,7 +696,7 @@ export function speechWindow(
   let last = -1;
   let speechFrames = 0;
   for (const frame of frames) {
-    if (frame.level < SPEECH_FLOOR) continue;
+    if (frame.level < floor) continue;
     if (first < 0) first = frame.atMs;
     last = frame.atMs;
     speechFrames += 1;
@@ -852,8 +879,49 @@ export function upcomingEvents(
     .sort((a, b) => a.start.localeCompare(b.start));
 }
 
-/** The one-minute reminder: future start, 2+ attendees, not yet announced. */
-export function dueReminder(
+/** The calendar meeting happening now (or within five minutes) that has a join link. */
+export function pickActiveMeeting(
+  events: CalendarEvent[],
+  now = Date.now(),
+): CalendarEvent | null {
+  const fiveMinutes = 5 * 60_000;
+  const current = events.filter((event) => {
+    const start = Date.parse(event.start);
+    const end = Date.parse(event.end);
+    return (
+      Number.isFinite(start) &&
+      Number.isFinite(end) &&
+      start <= now + fiveMinutes &&
+      end >= now - fiveMinutes &&
+      Boolean(event.meetingUrl)
+    );
+  });
+  current.sort(
+    (a, b) =>
+      Math.abs(Date.parse(a.start) - now) - Math.abs(Date.parse(b.start) - now),
+  );
+  return current[0] ?? null;
+}
+
+const MEETING_WINDOW_PATTERNS = [
+  /\bzoom\b/i,
+  /\bteams\b/i,
+  /\bgoogle meet\b/i,
+  /\bwebex\b/i,
+  /\bgotomeeting\b/i,
+  /\bgotowebinar\b/i,
+  /\bbluejeans\b/i,
+  /\bwhereby\b/i,
+  /\bjitsi\b/i,
+  /\bfacetime\b/i,
+];
+
+/** Only titles that name a known call app; a bare "meet" matches too much. */
+export function isMeetingWindowTitle(title: string): boolean {
+  return MEETING_WINDOW_PATTERNS.some((pattern) => pattern.test(title));
+}
+
+/** The one-minute reminder: future start, 2+ attendees, not yet announced. */ export function dueReminder(
   events: CalendarEvent[],
   now: number,
   notified: ReadonlySet<string>,
@@ -871,23 +939,6 @@ export function dueReminder(
   );
 }
 
-export function segmentFromChunk(
-  source: SpeakerSource,
-  text: string,
-  startMs: number,
-  endMs: number,
-  baseMs: number,
-): Segment {
-  return {
-    id: randomId(),
-    source,
-    speaker: source === 'mic' ? 'Me' : 'Them',
-    text,
-    startMs: baseMs + startMs,
-    endMs: baseMs + endMs,
-  };
-}
-
 export function mergeSegment(
   segments: Segment[],
   next: Segment,
@@ -898,6 +949,7 @@ export function mergeSegment(
   if (
     last &&
     last.source === next.source &&
+    last.speaker === next.speaker &&
     next.startMs - last.endMs <= maxGapMs &&
     last.text.length + next.text.length <= maxChars
   ) {
@@ -1053,4 +1105,18 @@ export function modelLabel(model: ChatModel): string {
     : model === 'thinking'
       ? 'Thinking'
       : 'Standard';
+}
+
+/**
+ * True when store.json was written by a failed save after the last IndexedDB
+ * commit. A startup seed or migrated file carries no marker and must lose.
+ */
+export function shouldImportFallback(
+  fileMtimeMs: number,
+  idbSavedAt: string,
+  fallbackSavedAt?: unknown,
+): boolean {
+  if (typeof fallbackSavedAt !== 'string') return false;
+  const idb = Date.parse(idbSavedAt);
+  return fileMtimeMs > idb && Date.parse(fallbackSavedAt) > idb;
 }
