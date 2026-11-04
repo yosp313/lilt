@@ -25,6 +25,7 @@
     "lint:fix": "oxlint --fix && oxfmt --write src index.html",
     "typecheck": "tsc --noEmit",
     "build:whisper": "node scripts/build-whisper.mjs",
+    "build:transcribe": "node scripts/build-transcribe.mjs",
     "test": "node --test src/shared/*.test.mjs"
   },
   "devDependencies": {
@@ -45,6 +46,7 @@
   },
   "dependencies": {
     "electron-squirrel-startup": "^1.0.1",
-    "idb": "^8.0.4"
+    "idb": "^8.0.4",
+    "sherpa-onnx-node": "^2.0.1"
   }
 }

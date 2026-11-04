@@ -147,3 +147,6 @@ out/
 
 # Built whisper.cpp engine (npm run build:whisper)
 vendor/
+
+# Rust build output for the streaming helper
+tools/*/target/

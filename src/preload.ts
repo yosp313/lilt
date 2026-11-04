@@ -4,6 +4,7 @@ import type {
   Api,
   CalendarEvent,
   Store,
+  StreamTextEvent,
   SttProgress,
   TranscribeRequest,
 } from './shared/types.ts';
@@ -23,6 +24,18 @@ const api: Api = {
       callback(progress);
     ipcRenderer.on('stt:progress', listener);
     return () => ipcRenderer.removeListener('stt:progress', listener);
+  },
+  streamStart: (source, language) =>
+    ipcRenderer.invoke('stt:stream-start', source, language),
+  streamPush: (source, pcm) => ipcRenderer.send('stt:stream-push', source, pcm),
+  streamStop: (source) => ipcRenderer.invoke('stt:stream-stop', source),
+  diarizationDownload: () => ipcRenderer.invoke('diarize:download'),
+  diarize: (pcm) => ipcRenderer.invoke('diarize:embed', pcm),
+  onStreamText: (callback) => {
+    const listener = (_event: unknown, value: StreamTextEvent) =>
+      callback(value);
+    ipcRenderer.on('stt:stream-text', listener);
+    return () => ipcRenderer.removeListener('stt:stream-text', listener);
   },
   calendarStatus: () => ipcRenderer.invoke('calendar:status'),
   calendarConnect: (

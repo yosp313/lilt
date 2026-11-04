@@ -10,10 +10,12 @@ import {
   folderPath,
   isLocalEndpoint,
   isMeetingWindowTitle,
+  isSttSource,
   LOCAL_STT_MODELS,
   localAnswer,
   localEnhance,
   localSttSource,
+  matchSpeaker,
   mergeSegment,
   mergeSettings,
   parseAttendees,
@@ -34,17 +36,29 @@ import {
   upcomingEvents,
   verifyQuote,
   visibleNotes,
+  cosineSimilarity,
+  SPEAKER_MATCH_THRESHOLD,
 } from './logic.ts';
 import { isPendingChunkPath } from './pending-path.ts';
 import { createSeed } from './seed.ts';
 
 const NOW = Date.now();
 
+test('every selectable STT source survives a config round trip', () => {
+  assert.equal(isSttSource('cloud'), true);
+  assert.equal(isSttSource('local-server'), true);
+  assert.equal(isSttSource('nemotron-streaming'), true);
+  assert.equal(isSttSource('whisper-small'), true);
+  assert.equal(isSttSource('whisper-tiny'), false);
+  assert.equal(isSttSource(''), false);
+});
+
 test('only known local Whisper models are accepted as an STT source', () => {
   assert.equal(localSttSource('cloud'), null);
   assert.equal(localSttSource('local-server'), null);
   assert.equal(localSttSource('whisper-tiny'), null);
-  assert.equal(localSttSource('whisper-large-v3'), null);
+  assert.equal(localSttSource('whisper-base'), null);
+  assert.equal(localSttSource('whisper-large-v3'), 'whisper-large-v3');
   assert.equal(
     localSttSource('whisper-large-v3-turbo'),
     'whisper-large-v3-turbo',
@@ -191,6 +205,7 @@ test('settings saved by an older version pick up new defaults', () => {
   assert.equal(merged.vadSensitivity, 0.5);
   assert.equal(merged.meetingDetectionEnabled, true);
   assert.equal(merged.autoStartMeetingRecording, false);
+  assert.equal(merged.diarizationEnabled, false);
   assert.deepEqual(mergeSettings(undefined), mergeSettings({}));
 });
 
@@ -584,6 +599,28 @@ test('upcoming events sort by start and drop those already over', () => {
     events.map((event) => event.title),
     ['Next', 'Later'],
   );
+});
+
+test('diarization settings default off and merge old stores', () => {
+  assert.equal(mergeSettings(undefined).diarizationEnabled, false);
+});
+
+test('speaker matching reuses a known voice and opens a new label for strangers', () => {
+  const profiles = [];
+  const vector = () => new Float32Array(4).map((_, i) => i + 1);
+  const first = matchSpeaker(profiles, vector());
+  assert.equal(first.profile.label, 'Speaker A');
+  const again = matchSpeaker(profiles, vector());
+  assert.equal(again.profile.label, 'Speaker A');
+  const stranger = matchSpeaker(profiles, new Float32Array([2, -1, 4, -3]));
+  assert.equal(stranger.profile.label, 'Speaker B');
+});
+
+test('cosine similarity is 1 for the same vector and 0 for an empty one', () => {
+  const vector = new Float32Array([0.5, 0.5, 0.5]);
+  assert.equal(cosineSimilarity(vector, vector), 1);
+  assert.equal(cosineSimilarity(vector, new Float32Array([0, 0, 0])), 0);
+  assert.ok(cosineSimilarity(vector, vector) > SPEAKER_MATCH_THRESHOLD);
 });
 
 test('a reminder fires once for a meeting starting within a minute with 2+ attendees', () => {

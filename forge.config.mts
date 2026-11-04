@@ -9,9 +9,11 @@ import { FuseV1Options, FuseVersion } from '@electron/fuses';
 
 const config: ForgeConfig = {
   packagerConfig: {
-    asar: true,
-    // whisper.cpp binary; built by `npm run build:whisper`.
-    extraResource: ['./vendor/whisper'],
+    // The sherpa-onnx addon loads its .so beside the .node, so they must stay
+    // unpacked together.
+    asar: { unpack: '**/sherpa-onnx-*/**' },
+    // whisper.cpp and transcribe.cpp helpers, built by `npm run build:*`.
+    extraResource: ['./vendor/whisper', './vendor/transcribe'],
   },
   rebuildConfig: {},
   makers: [

@@ -77,6 +77,7 @@ export const DEFAULT_SETTINGS: Settings = {
   vadSensitivity: 0.5,
   autoStartMeetingRecording: false,
   meetingDetectionEnabled: true,
+  diarizationEnabled: false,
 };
 
 /** Fill in settings added since this store was written. */
@@ -569,22 +570,25 @@ export function isLocalEndpoint(baseUrl: string): boolean {
   );
 }
 
-export type LocalSttSource = Exclude<SttSource, 'cloud' | 'local-server'>;
+export type LocalSttSource = Exclude<
+  SttSource,
+  'cloud' | 'local-server' | 'nemotron-streaming'
+>;
+
+/** One downloadable model file, shared by every local model download. */
+export interface SttModelFile {
+  label: string;
+  file: string;
+  url: string;
+  sizeMb: number;
+}
 
 /**
  * Local Whisper runs through whisper.cpp on the CPU, so encoder size sets the
  * pace. small q5 (~190 MB) keeps up with live capture on a laptop core;
  * large-v3-turbo is more accurate but ~3× the encoder work and falls behind.
  */
-export const LOCAL_STT_MODELS: Record<
-  LocalSttSource,
-  {
-    label: string;
-    file: string;
-    url: string;
-    sizeMb: number;
-  }
-> = {
+export const LOCAL_STT_MODELS: Record<LocalSttSource, SttModelFile> = {
   'whisper-small': {
     label: 'Whisper small',
     file: 'ggml-small-q5_1.bin',
@@ -603,6 +607,37 @@ export const LOCAL_STT_MODELS: Record<
     url: 'https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-large-v3-turbo-q5_0.bin',
     sizeMb: 574,
   },
+  // Turbo's distilled decoder is weaker on non-English audio; this is the full
+  // model for Arabic and other languages where turbo regresses.
+  'whisper-large-v3': {
+    label: 'Whisper large-v3',
+    file: 'ggml-large-v3-q5_0.bin',
+    url: 'https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-large-v3-q5_0.bin',
+    sizeMb: 1081,
+  },
+};
+
+/**
+ * Live streaming ASR (parakeet family, transcribe.cpp). Unlike the Whisper
+ * models above it emits text while you speak, so it is the only source that
+ * does not wait for a chunk to end.
+ */
+export const STREAM_STT_MODEL: SttModelFile = {
+  label: 'Nemotron 3.5 streaming',
+  file: 'nemotron-3.5-asr-streaming-0.6b-Q4_K_M.gguf',
+  url: 'https://huggingface.co/handy-computer/nemotron-3.5-asr-streaming-0.6b-gguf/resolve/main/nemotron-3.5-asr-streaming-0.6b-Q4_K_M.gguf',
+  sizeMb: 496,
+};
+
+/**
+ * Voice-print model for speaker labels. The embedding runs in the main
+ * process; matching the embeddings to a speaker happens in the renderer.
+ */
+export const DIARIZATION_MODEL: SttModelFile = {
+  label: 'Speaker labels',
+  file: '3dspeaker_speech_campplus_sv_zh-cn_16k-common.onnx',
+  url: 'https://github.com/k2-fsa/sherpa-onnx/releases/download/speaker-recongition-models/3dspeaker_speech_campplus_sv_zh-cn_16k-common.onnx',
+  sizeMb: 28,
 };
 
 /**
@@ -644,6 +679,16 @@ export function localSttSource(value: string): LocalSttSource | null {
   return Object.hasOwn(LOCAL_STT_MODELS, value)
     ? (value as LocalSttSource)
     : null;
+}
+
+/** Stored config is a trust boundary: only known sources may be kept. */
+export function isSttSource(value: string): value is SttSource {
+  return (
+    value === 'cloud' ||
+    value === 'local-server' ||
+    value === 'nemotron-streaming' ||
+    localSttSource(value) !== null
+  );
 }
 
 // ---------------------------------------------------------------------------
@@ -961,6 +1006,68 @@ export function mergeSegment(
     return [...segments.slice(0, -1), merged];
   }
   return [...segments, next];
+}
+
+/**
+ * Cosine similarity of two voice embeddings. 0.6 separated different voices
+ * from the same voice by a wide margin with the bundled model; raise it if one
+ * person keeps splitting into new labels, lower it if two people merge.
+ */
+export const SPEAKER_MATCH_THRESHOLD = 0.6;
+const MAX_SPEAKER_SAMPLES = 8;
+
+export interface SpeakerProfile {
+  label: string;
+  vectors: Float32Array[];
+}
+
+export function cosineSimilarity(a: Float32Array, b: Float32Array): number {
+  let dot = 0;
+  let aNorm = 0;
+  let bNorm = 0;
+  const length = Math.min(a.length, b.length);
+  for (let index = 0; index < length; index += 1) {
+    dot += a[index] * b[index];
+    aNorm += a[index] * a[index];
+    bNorm += b[index] * b[index];
+  }
+  if (aNorm === 0 || bNorm === 0) return 0;
+  return dot / Math.sqrt(aNorm * bNorm);
+}
+
+function speakerLabel(index: number): string {
+  return `Speaker ${String.fromCharCode(65 + (index % 26))}`;
+}
+
+/**
+ * Reuse the closest voice already heard in this recording, or start a new
+ * speaker. A new voice scores 0; a matched one scores its similarity.
+ */
+export function matchSpeaker(
+  profiles: SpeakerProfile[],
+  embedding: Float32Array,
+): { profile: SpeakerProfile; score: number } {
+  let best: SpeakerProfile | null = null;
+  let bestScore = -1;
+  for (const profile of profiles) {
+    for (const vector of profile.vectors) {
+      const score = cosineSimilarity(embedding, vector);
+      if (score > bestScore) {
+        best = profile;
+        bestScore = score;
+      }
+    }
+  }
+  if (best && bestScore >= SPEAKER_MATCH_THRESHOLD) {
+    if (best.vectors.length < MAX_SPEAKER_SAMPLES) best.vectors.push(embedding);
+    return { profile: best, score: bestScore };
+  }
+  const profile: SpeakerProfile = {
+    label: speakerLabel(profiles.length),
+    vectors: [embedding],
+  };
+  profiles.push(profile);
+  return { profile, score: 0 };
 }
 
 export function noteSummary(note: Note): string {

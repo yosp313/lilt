@@ -20,12 +20,15 @@ import type {
   CalendarEvent,
   CalendarStatus,
   Store,
+  SpeakerSource,
   SttSource,
   TranscribeRequest,
 } from './shared/types.ts';
 import {
+  DIARIZATION_MODEL,
   escapeHtml,
   isLocalEndpoint,
+  isSttSource,
   LOCAL_STT_MODELS,
   localSttSource,
   mapGoogleEvents,
@@ -37,15 +40,25 @@ import {
 } from './shared/logic.ts';
 import {
   downloadLocalModel,
+  downloadModel,
   localModelReady,
   localServerTranscribe,
   localTranscribe,
   stopLocalServer,
 } from './local-stt.ts';
+import {
+  downloadStreamModel,
+  pushStream,
+  startStream,
+  stopAllStreams,
+  stopStream,
+  streamModelReady,
+} from './stream-stt.ts';
 import { createSeed } from './shared/seed.ts';
 import crypto from 'node:crypto';
 import { startMeetingPolling } from './meeting-detection.ts';
 import { registerAudioRetentionIpc } from './audio-retention.ts';
+import { diarizationReady, voiceEmbedding } from './diarization.ts';
 
 if (started) app.quit();
 
@@ -181,11 +194,7 @@ function readAiConfig(): StoredAiConfig {
       fs.readFileSync(aiConfigPath(), 'utf8'),
     ) as StoredAiConfig;
     const config = { ...DEFAULT_AI, ...parsed };
-    if (
-      config.sttSource !== 'cloud' &&
-      config.sttSource !== 'local-server' &&
-      localSttSource(config.sttSource) === null
-    ) {
+    if (!isSttSource(config.sttSource)) {
       config.sttSource = DEFAULT_AI.sttSource;
     }
     return config;
@@ -308,12 +317,18 @@ async function aiStatus(): Promise<AiConfig> {
     sttReady:
       config.sttSource === 'local-server'
         ? config.sttServerUrl.trim().length > 0
-        : local
-          ? localModelReady(dataDir(), local)
-          : key.length > 0 || isLocalEndpoint(config.baseUrl),
-    localModels: (Object.keys(LOCAL_STT_MODELS) as LocalSttSource[]).map(
-      (id) => ({ id, ready: localModelReady(dataDir(), id) }),
-    ),
+        : config.sttSource === 'nemotron-streaming'
+          ? streamModelReady(dataDir())
+          : local
+            ? localModelReady(dataDir(), local)
+            : key.length > 0 || isLocalEndpoint(config.baseUrl),
+    localModels: [
+      ...(Object.keys(LOCAL_STT_MODELS) as LocalSttSource[]).map((id) => ({
+        id,
+        ready: localModelReady(dataDir(), id),
+      })),
+      { id: 'nemotron-streaming', ready: streamModelReady(dataDir()) },
+    ],
     baseUrl: config.baseUrl,
     sttServerUrl: config.sttServerUrl,
     chatModel: config.chatModel,
@@ -323,6 +338,7 @@ async function aiStatus(): Promise<AiConfig> {
     keyStored:
       Boolean(config.keyEncrypted) &&
       (await safeStorage.isAsyncEncryptionAvailable()),
+    diarizationReady: diarizationReady(dataDir()),
   };
 }
 
@@ -396,6 +412,10 @@ async function complete(req: AiCompleteRequest): Promise<{ text: string }> {
 
 async function transcribe(req: TranscribeRequest): Promise<{ text: string }> {
   const config = readAiConfig();
+  if (config.sttSource === 'nemotron-streaming')
+    throw new Error(
+      'Live transcription writes text while you record; it has nothing to re-run from a finished chunk.',
+    );
   if (config.sttSource === 'local-server') {
     if (!config.sttServerUrl.trim())
       throw new Error(
@@ -449,8 +469,11 @@ async function transcribe(req: TranscribeRequest): Promise<{ text: string }> {
   );
   form.append('model', config.sttModel);
   form.append('response_format', 'json');
-  // Auto-detect for mixed-language / code-switching (Arabic + English, etc.).
-  // Whisper-large-v3-turbo detects well; forcing a language breaks mixed speech.
+  // Match the local path: send the configured language, and let the provider
+  // detect only when it is set to auto.
+  if (req.language && req.language !== 'auto') {
+    form.append('language', req.language);
+  }
   if (req.prompt) form.append('prompt', req.prompt);
   const response = await fetch(endpoint(config, '/audio/transcriptions'), {
     method: 'POST',
@@ -1122,11 +1145,7 @@ function registerIpc(): void {
         next.thinkingModel.trim() || DEFAULT_AI.thinkingModel;
       config.sttModel = next.sttModel.trim() || DEFAULT_AI.sttModel;
       config.sttLanguage = next.sttLanguage.trim() || DEFAULT_AI.sttLanguage;
-      if (
-        next.sttSource === 'cloud' ||
-        next.sttSource === 'local-server' ||
-        localSttSource(next.sttSource) !== null
-      ) {
+      if (isSttSource(next.sttSource)) {
         config.sttSource = next.sttSource;
       }
       if (typeof next.apiKey === 'string') {
@@ -1155,16 +1174,52 @@ function registerIpc(): void {
     transcribe(req),
   );
   ipcMain.handle('stt:download', async (event, requested: SttSource) => {
+    const progress = (value: { file: string; percent: number }) => {
+      if (!event.sender.isDestroyed()) {
+        event.sender.send('stt:progress', value);
+      }
+    };
+    if (requested === 'nemotron-streaming') {
+      await downloadStreamModel(dataDir(), progress);
+      return aiStatus();
+    }
     const source = localSttSource(requested);
     if (!source)
       throw new Error('Choose a local Whisper model in Settings first.');
-    await downloadLocalModel(dataDir(), source, (progress) => {
+    await downloadLocalModel(dataDir(), source, progress);
+    return aiStatus();
+  });
+  ipcMain.handle(
+    'stt:stream-start',
+    (event, source: SpeakerSource, language: string) => {
+      startStream(dataDir(), source, language, (value) => {
+        if (!event.sender.isDestroyed()) {
+          event.sender.send('stt:stream-text', value);
+        }
+      });
+    },
+  );
+  ipcMain.on(
+    'stt:stream-push',
+    (_event, source: SpeakerSource, pcm: Float32Array) => {
+      pushStream(source, pcm);
+    },
+  );
+  ipcMain.handle('stt:stream-stop', (_event, source: SpeakerSource) => {
+    stopStream(source);
+  });
+
+  ipcMain.handle('diarize:download', async (event) => {
+    await downloadModel(dataDir(), DIARIZATION_MODEL, (value) => {
       if (!event.sender.isDestroyed()) {
-        event.sender.send('stt:progress', progress);
+        event.sender.send('stt:progress', value);
       }
     });
     return aiStatus();
   });
+  ipcMain.handle('diarize:embed', (_event, pcm: Float32Array) =>
+    voiceEmbedding(dataDir(), pcm),
+  );
 
   ipcMain.handle('calendar:status', () => calendarStatus());
   ipcMain.handle(
@@ -1340,5 +1395,6 @@ app.on('window-all-closed', () => {
 
 app.on('before-quit', () => {
   stopLocalServer();
+  stopAllStreams();
   shareServer?.close();
 });

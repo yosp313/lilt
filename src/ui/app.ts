@@ -13,7 +13,9 @@ import type {
   Section,
   Segment,
   Space,
+  SpeakerSource,
   Store,
+  StreamTextEvent,
   SttSource,
   Template,
 } from '../shared/types.ts';
@@ -22,6 +24,7 @@ import {
   buildChatMessages,
   buildEnhanceMessages,
   calendarEventKey,
+  DIARIZATION_MODEL,
   dueReminder,
   encodeWav,
   enhancedText,
@@ -32,6 +35,7 @@ import {
   LOCAL_STT_MODELS,
   localAnswer,
   localEnhance,
+  matchSpeaker,
   mergeSegment,
   modelLabel,
   noteSummary,
@@ -40,9 +44,11 @@ import {
   relativeDate,
   retrieve,
   searchNotes,
+  STREAM_STT_MODEL,
   toCsv,
   trimPcm,
   truncate,
+  type SpeakerProfile,
   type SpeechWindow,
   upcomingEvents,
   visibleNotes,
@@ -138,10 +144,29 @@ let ui: UI;
 let capture: Capture;
 let recordingNoteId: ID | null = null;
 let recordingBaseMs = 0;
+// Voices heard in the current recording, keyed by note and start offset.
+const speakerProfiles = new Map<string, SpeakerProfile[]>();
 let pendingTranscriptions = 0;
 let listRenderTimer: number | null = null;
 let detectedMeeting: CalendarEvent | null = null;
 let meetingBannerDismissed = false;
+
+/**
+ * Live streaming state per audio source. `committed` is the prefix already
+ * written to the note; `fromMs`/`endMs` bound the audio it covers.
+ */
+interface LiveFeed {
+  noteId: ID;
+  baseMs: number;
+  committed: string;
+  tail: string;
+  fromMs: number;
+  endMs: number;
+}
+
+const liveFeeds = new Map<SpeakerSource, LiveFeed>();
+let liveSources: SpeakerSource[] = [];
+const livePushes = new Map<SpeakerSource, Promise<void>>();
 
 interface ChunkJob {
   noteId: ID;
@@ -384,6 +409,17 @@ function createCapture(): Capture {
       onLevel: updateMeters,
       onChunk: (source, blob, start, end, speech) => {
         if (!recordingNoteId) return;
+        if (ui.ai.sttSource === 'nemotron-streaming') {
+          pushLiveChunk(
+            source,
+            recordingNoteId,
+            recordingBaseMs,
+            blob,
+            start,
+            end,
+          );
+          return;
+        }
         void queueChunk({
           noteId: recordingNoteId,
           baseMs: recordingBaseMs,
@@ -402,7 +438,12 @@ function createCapture(): Capture {
         void stopRecording();
       },
     },
-    () => (ui.ai.sttSource === 'cloud' ? 7000 : LOCAL_CHUNK_MS),
+    () =>
+      ui.ai.sttSource === 'nemotron-streaming'
+        ? 1000
+        : ui.ai.sttSource === 'cloud'
+          ? 7000
+          : LOCAL_CHUNK_MS,
   );
   capture.setSensitivity(ui.db.settings.vadSensitivity ?? 0.5);
   return capture;
@@ -435,6 +476,9 @@ function handleCaptureState(state: 'recording' | 'paused' | 'stopped'): void {
 function finalizeRecording(): void {
   const note = noteById(recordingNoteId);
   recordingNoteId = null;
+  // Closing the engine's input flushes its last words; the final update still
+  // arrives and lands in the note because the feed remembers its note.
+  void stopLiveStreams();
   if (!note) return;
   note.status = 'ended';
   note.endedAt = nowIso();
@@ -501,6 +545,8 @@ async function startRecording(note: Note): Promise<void> {
   if (capture.isRunning) return;
   recordingBaseMs = note.status === 'ended' ? note.durationMs : 0;
   recordingNoteId = note.id;
+  // A new session gets fresh labels; old voices must not leak into it.
+  speakerProfiles.clear();
   note.status = 'recording';
   note.startedAt = note.startedAt ?? nowIso();
   note.endedAt = null;
@@ -512,6 +558,7 @@ async function startRecording(note: Note): Promise<void> {
   renderAll();
   try {
     await capture.start(ui.db.settings.includeSystemAudio);
+    await startLiveStreams();
   } catch (error) {
     recordingNoteId = null;
     note.status = note.durationMs > 0 ? 'ended' : 'draft';
@@ -535,6 +582,15 @@ async function stopRecording(): Promise<void> {
   if (capture?.isRunning) await capture.stop();
 }
 
+function warnNoModel(): void {
+  if (ui.sttWarned) return;
+  ui.sttWarned = true;
+  ui.sttError =
+    'Transcription needs a speech-to-text model. Pick a cloud provider or download one in Settings → Intelligence. Audio is not saved.';
+  toast('No speech-to-text model ready — your notes are still being saved.');
+  if (ui.view.name === 'note') renderMain();
+}
+
 async function persistPendingChunk(job: ChunkJob): Promise<string | null> {
   try {
     return await window.api.audioRetention.writePending({
@@ -547,7 +603,7 @@ async function persistPendingChunk(job: ChunkJob): Promise<string | null> {
       speechEndMs: job.speech.endMs,
       baseMs: job.baseMs,
       language: ui.db.settings.sttLanguage,
-      prompt: sttPrompt(noteById(job.noteId)),
+      prompt: sttPrompt(noteById(job.noteId), ui.db.settings.sttLanguage),
     });
   } catch (error) {
     console.error('Failed to write pending chunk:', error);
@@ -555,17 +611,126 @@ async function persistPendingChunk(job: ChunkJob): Promise<string | null> {
   }
 }
 
+/**
+ * Live transcription keeps one engine running per audio source and feeds it
+ * short chunks as they are captured, so text lands while the person is still
+ * talking instead of after a 15-second pause.
+ */
+function liveStreaming(): boolean {
+  return ui.ai.sttSource === 'nemotron-streaming';
+}
+
+async function startLiveStreams(): Promise<void> {
+  if (!liveStreaming()) return;
+  if (!ui.ai.sttReady) {
+    warnNoModel();
+    return;
+  }
+  liveSources = [...capture.sources];
+  for (const source of liveSources) {
+    pendingTranscriptions += 1;
+    try {
+      await window.api.streamStart(source, ui.db.settings.sttLanguage);
+    } catch (error) {
+      pendingTranscriptions = Math.max(0, pendingTranscriptions - 1);
+      liveSources = liveSources.filter((entry) => entry !== source);
+      reportStreamError(ipcMessage(error, 'The live engine could not start.'));
+    }
+  }
+}
+
+async function stopLiveStreams(): Promise<void> {
+  const sources = liveSources;
+  liveSources = [];
+  // A chunk captured in the last second may still be decoding; the engine has
+  // to see it before its input closes or the final words are lost.
+  await Promise.allSettled([...livePushes.values()]);
+  for (const source of sources) {
+    if (liveSources.includes(source)) continue;
+    void window.api.streamStop(source);
+  }
+}
+
+function pushLiveChunk(
+  source: SpeakerSource,
+  noteId: ID,
+  baseMs: number,
+  blob: Blob,
+  startMs: number,
+  endMs: number,
+): void {
+  const feed = liveFeeds.get(source);
+  if (feed && feed.noteId === noteId) feed.endMs = endMs;
+  else
+    liveFeeds.set(source, {
+      noteId,
+      baseMs,
+      committed: '',
+      tail: '',
+      fromMs: startMs,
+      endMs,
+    });
+  // Decode one chunk at a time: two parallel decodes could reach the engine
+  // out of order and break its sense of the timeline.
+  livePushes.set(
+    source,
+    (livePushes.get(source) ?? Promise.resolve())
+      .then(async () => {
+        // Untrimmed on purpose: the engine wants continuous audio, and the
+        // capture layer already dropped chunks without speech.
+        window.api.streamPush(source, await blobToPcm(blob));
+      })
+      .catch((error: unknown) =>
+        console.error('Live audio push failed:', error),
+      ),
+  );
+}
+
+function handleStreamText(event: StreamTextEvent): void {
+  if (event.final)
+    pendingTranscriptions = Math.max(0, pendingTranscriptions - 1);
+  if (event.error) {
+    reportStreamError(event.error);
+    liveFeeds.delete(event.source);
+    return;
+  }
+  const feed = liveFeeds.get(event.source);
+  if (!feed) return;
+  // Committed text only grows; anything else is the engine starting over on a
+  // bad hypothesis, so drop what it withdrew instead of duplicating it.
+  const fresh = event.committed.startsWith(feed.committed)
+    ? event.committed.slice(feed.committed.length)
+    : '';
+  feed.committed = event.committed;
+  feed.tail = event.tentative;
+  const note = noteById(feed.noteId);
+  if (fresh.trim() && note && !note.deletedAt) {
+    addTranscriptSegment(
+      note,
+      event.source,
+      fresh.trim(),
+      feed.fromMs,
+      feed.endMs,
+      feed.baseMs,
+    );
+    feed.fromMs = feed.endMs;
+  } else {
+    renderTranscript();
+  }
+  if (event.final) liveFeeds.delete(event.source);
+}
+
+function reportStreamError(message: string): void {
+  if (ui.sttWarned) return;
+  ui.sttWarned = true;
+  ui.sttError = `Live transcription stopped: ${message}`;
+  toast('Live transcription stopped. Your notes are still being saved.');
+  if (ui.view.name === 'note') renderMain();
+}
+
 async function queueChunk(job: ChunkJob): Promise<void> {
   if (!ui.ai.sttReady) {
-    if (!ui.sttWarned) {
-      ui.sttWarned = true;
-      ui.sttError =
-        'Transcription needs a speech-to-text model. Pick a cloud provider or download Whisper in Settings → Intelligence. Audio is not saved.';
-      toast(
-        'No speech-to-text model ready — your notes are still being saved.',
-      );
-      if (ui.view.name === 'note') renderMain();
-    }
+    warnNoModel();
     return;
   }
   pendingTranscriptions += 1;
@@ -598,7 +763,7 @@ async function runChunks(source: 'mic' | 'system'): Promise<void> {
 async function transcribeChunk(job: ChunkJob): Promise<void> {
   try {
     const local = ui.ai.sttSource !== 'cloud';
-    const prompt = sttPrompt(noteById(job.noteId));
+    const prompt = sttPrompt(noteById(job.noteId), ui.db.settings.sttLanguage);
     const pcm = trimPcm(await blobToPcm(job.blob), job.speech);
     const { text } = await window.api.transcribe(
       local
@@ -616,8 +781,10 @@ async function transcribeChunk(job: ChunkJob): Promise<void> {
       job.pendingPath = null;
     }
     const note = noteById(job.noteId);
-    if (!note || !text.trim()) return;
+    // Chunks outlive a note that was trashed mid-flight; don't write into it.
+    if (!note || note.deletedAt || !text.trim()) return;
 
+    const speaker = await systemSpeaker(job, pcm);
     addTranscriptSegment(
       note,
       job.source,
@@ -625,6 +792,8 @@ async function transcribeChunk(job: ChunkJob): Promise<void> {
       job.startMs + job.speech.startMs,
       job.startMs + job.speech.endMs,
       job.baseMs,
+      speaker?.label,
+      speaker?.score,
     );
   } catch (error) {
     console.error(error);
@@ -651,18 +820,55 @@ async function transcribeChunk(job: ChunkJob): Promise<void> {
   }
 }
 
-/** Meeting words prime Whisper's decoder so names and terms come out right. */
-function sttPrompt(note: Note | null): string | undefined {
+/** Label for one system-audio chunk, or null when labeling is off/unready. */
+async function systemSpeaker(
+  job: ChunkJob,
+  pcm: Float32Array,
+): Promise<{ label: string; score: number } | null> {
+  if (
+    job.source !== 'system' ||
+    !ui.db.settings.diarizationEnabled ||
+    !ui.ai.diarizationReady
+  ) {
+    return null;
+  }
+  try {
+    const embedding = await window.api.diarize(pcm);
+    const key = `${job.noteId}:${job.baseMs}`;
+    const profiles = speakerProfiles.get(key) ?? [];
+    const match = matchSpeaker(profiles, embedding);
+    speakerProfiles.set(key, profiles);
+    return { label: match.profile.label, score: match.score };
+  } catch (error) {
+    // A missing or broken voice model must never cost a transcript.
+    console.error('Speaker labeling failed:', error);
+    return null;
+  }
+}
+
+/** Meeting words prime Whisper's decoder so names and terms come out right.
+ *  The scaffolding follows the transcript language: an English "Meeting:" in
+ *  front of Arabic audio nudges the decoder toward English output. */
+const PROMPT_LABELS: Record<string, [meeting: string, participants: string]> = {
+  ar: ['الاجتماع', 'المشاركون'],
+};
+
+function sttPrompt(note: Note | null, language: string): string | undefined {
   if (!note) return undefined;
+  const [meetingLabel, participantsLabel] = PROMPT_LABELS[language] ?? [
+    'Meeting',
+    'Participants',
+  ];
   const title = note.title.trim();
   const parts = /^(new note|untitled)/i.test(title)
     ? []
-    : [`Meeting: ${title}.`];
+    : [`${meetingLabel}: ${title}.`];
   const people = note.attendees
     .map((person) => person.trim())
     .filter(Boolean)
     .slice(0, 12);
-  if (people.length > 0) parts.push(`Participants: ${people.join(', ')}.`);
+  if (people.length > 0)
+    parts.push(`${participantsLabel}: ${people.join(', ')}.`);
   return parts.join(' ').slice(0, 300) || undefined;
 }
 
@@ -1512,7 +1718,10 @@ function runRecipe(recipe: Recipe): void {
   focusChatInput();
 }
 
-async function saveSettings(form: HTMLFormElement): Promise<void> {
+async function saveSettings(
+  form: HTMLFormElement,
+  quiet = false,
+): Promise<void> {
   const data = new FormData(form);
   ui.db.settings.includeSystemAudio = data.get('includeSystemAudio') === 'on';
   ui.db.settings.autoEnhance = data.get('autoEnhance') === 'on';
@@ -1521,7 +1730,9 @@ async function saveSettings(form: HTMLFormElement): Promise<void> {
     data.get('meetingDetectionEnabled') === 'on';
   ui.db.settings.autoStartMeetingRecording =
     data.get('autoStartMeetingRecording') === 'on';
+  ui.db.settings.diarizationEnabled = data.get('diarizationEnabled') === 'on';
   ui.db.settings.vadSensitivity = Number(data.get('vadSensitivity') ?? 0.5);
+  if (capture) capture.setSensitivity(ui.db.settings.vadSensitivity);
   ui.db.settings.sttLanguage = String(data.get('sttLanguage') ?? 'en');
   ui.db.user.name =
     String(data.get('userName') ?? ui.db.user.name).trim() || ui.db.user.name;
@@ -1541,7 +1752,7 @@ async function saveSettings(form: HTMLFormElement): Promise<void> {
       sttSource: String(data.get('sttSource') ?? ui.ai.sttSource) as SttSource,
       ...(apiKey ? { apiKey } : {}),
     });
-    toast('Settings saved.');
+    if (!quiet) toast('Settings saved.');
   } catch (error) {
     console.error(error);
     toast('Settings saved locally, but the AI configuration failed.');
@@ -1759,7 +1970,7 @@ ${note.rawNotes}</textarea>
                     ? html`<div class="transcript-empty">
                         ${icon('wave', 20)}
                         <p>
-                          ${ui.ai.sttReady ? (ui.ai.sttSource === 'cloud' ? 'Listening. The first lines appear after a few seconds.' : 'Listening. Text appears a few seconds after you pause.') : 'Capturing levels. Choose a speech-to-text model in Settings to see words here.'}
+                          ${ui.ai.sttReady ? (ui.ai.sttSource === 'nemotron-streaming' ? 'Listening. Words appear while you speak.' : ui.ai.sttSource === 'cloud' ? 'Listening. The first lines appear after a few seconds.' : 'Listening. Text appears a few seconds after you pause.') : 'Capturing levels. Choose a speech-to-text model in Settings to see words here.'}
                         </p>
                       </div>`
                     : transcriptList(note, true)
@@ -1923,6 +2134,7 @@ function enhancedSection(note: Note, section: Section): Html {
               data-section-id="${section.id}"
               data-note-id="${note.id}"
               spellcheck="false"
+              dir="auto"
               >${bullet.text}</span
             >
             ${
@@ -2041,7 +2253,7 @@ function transcriptList(note: Note, live: boolean): Html {
             </button>
           </span>
         </div>
-        <div class="seg-text">${segment.text}</div>
+        <div class="seg-text" dir="auto">${segment.text}</div>
       </div>`,
   )}${
     live
@@ -2049,10 +2261,23 @@ function transcriptList(note: Note, live: boolean): Html {
           class="seg listening ${note.status === 'paused' ? 'paused' : ''}"
         >
           <span class="listening-dot"></span>
-          <span>${note.status === 'paused' ? 'Paused' : 'Listening…'}</span>
+          <span dir="auto"
+            >${
+              note.status === 'paused' ? 'Paused' : liveTail() || 'Listening…'
+            }</span
+          >
         </div>`
       : ''
   }`;
+}
+
+/** The still-revisable end of the live text, when the engine reports one. */
+function liveTail(): string {
+  if (!liveStreaming()) return '';
+  return [...liveFeeds.values()]
+    .map((feed) => feed.tail)
+    .join(' ')
+    .trim();
 }
 
 function renderTranscript(): void {
@@ -3145,15 +3370,20 @@ function sttLocalStatus(): string {
     return `Downloading ${ui.sttDownload.file} — ${ui.sttDownload.percent}%`;
   const source = currentSttSource();
   if (source === 'cloud' || source === 'local-server') return '';
+  if (source === 'nemotron-streaming') {
+    return localModelReady(source)
+      ? `${STREAM_STT_MODEL.label} is on this computer. Words appear while you speak, in 28 languages including Arabic.`
+      : `${STREAM_STT_MODEL.label} · about ${(STREAM_STT_MODEL.sizeMb / 1000).toFixed(1)} GB. Writes text while you speak instead of waiting for a pause. Download once; it stays on this device.`;
+  }
   const model = LOCAL_STT_MODELS[source];
-  const large = source === 'whisper-large-v3-turbo';
+  const large = source !== 'whisper-small';
   if (localModelReady(source)) {
     return large
-      ? `${model.label} is on this computer. Most accurate, but slower than small; use a GPU server if live notes lag.`
+      ? `${model.label} is on this computer. Most accurate, but much slower than small; use a GPU server if live notes lag.`
       : `${model.label} is on this computer. Audio never leaves it.`;
   }
   return large
-    ? `${model.label} · about ${(model.sizeMb / 1000).toFixed(1)} GB. Most accurate, but ~3× slower than small on a CPU. Download once; it stays on this device.`
+    ? `${model.label} · about ${(model.sizeMb / 1000).toFixed(1)} GB. Most accurate, but much slower than small on a CPU. Download once; it stays on this device.`
     : `${model.label} · about ${(model.sizeMb / 1000).toFixed(1)} GB. Fast enough for live notes on a CPU. Download once; it stays on this device.`;
 }
 
@@ -3187,11 +3417,15 @@ async function downloadSttModel(): Promise<void> {
   if (ui.sttDownload) return;
   const source = currentSttSource();
   if (source === 'cloud' || source === 'local-server') return;
-  ui.sttDownload = { file: LOCAL_STT_MODELS[source].label, percent: 0 };
+  const model =
+    source === 'nemotron-streaming'
+      ? STREAM_STT_MODEL
+      : LOCAL_STT_MODELS[source];
+  ui.sttDownload = { file: model.label, percent: 0 };
   updateSttSettings();
   try {
     ui.ai = await window.api.sttDownload(source);
-    toast('Whisper is ready. Save settings to use it.');
+    toast(`${model.label} is ready.`);
   } catch (error) {
     console.error(error);
     toast(
@@ -3202,6 +3436,48 @@ async function downloadSttModel(): Promise<void> {
   } finally {
     ui.sttDownload = null;
     updateSttSettings();
+  }
+}
+
+function diarizationStatus(): string {
+  if (ui.sttDownload?.file === DIARIZATION_MODEL.label)
+    return `Downloading — ${ui.sttDownload.percent}%`;
+  return ui.ai.diarizationReady
+    ? `${DIARIZATION_MODEL.label} model is on this computer. Audio never leaves it.`
+    : `${DIARIZATION_MODEL.label} · about ${DIARIZATION_MODEL.sizeMb} MB. Download once; it stays on this device.`;
+}
+
+function updateDiarizationSettings(): void {
+  const status = document.getElementById('diarize-status');
+  if (status) status.textContent = diarizationStatus();
+  const button = document.querySelector<HTMLButtonElement>('#diarize-download');
+  if (!button) return;
+  const downloading = ui.sttDownload?.file === DIARIZATION_MODEL.label;
+  button.disabled = downloading || ui.ai.diarizationReady;
+  button.textContent = downloading
+    ? 'Downloading…'
+    : ui.ai.diarizationReady
+      ? 'Downloaded'
+      : 'Download model';
+}
+
+async function downloadDiarizationModel(): Promise<void> {
+  if (ui.sttDownload) return;
+  ui.sttDownload = { file: DIARIZATION_MODEL.label, percent: 0 };
+  updateDiarizationSettings();
+  try {
+    ui.ai = await window.api.diarizationDownload();
+    toast(`${DIARIZATION_MODEL.label} model is ready.`);
+  } catch (error) {
+    console.error(error);
+    toast(
+      error instanceof Error
+        ? error.message
+        : 'The model could not be downloaded.',
+    );
+  } finally {
+    ui.sttDownload = null;
+    updateDiarizationSettings();
   }
 }
 
@@ -3244,6 +3520,13 @@ function settingsView(): Html {
               ${ui.ai.sttSource === 'local-server' ? raw('selected') : ''}
             >
               Local server · GPU Whisper
+            </option>
+            <option
+              value="nemotron-streaming"
+              ${ui.ai.sttSource === 'nemotron-streaming' ? raw('selected') : ''}
+            >
+              On this computer · ${STREAM_STT_MODEL.label} ·
+              ${(STREAM_STT_MODEL.sizeMb / 1000).toFixed(1)} GB · live
             </option>
             ${Object.entries(LOCAL_STT_MODELS).map(
               ([value, model]) =>
@@ -3391,7 +3674,7 @@ function settingsView(): Html {
             <select name="sttLanguage">
               ${[
                 ['en', 'English'],
-                ['auto', 'Detect automatically'],
+                ['auto', 'Detect automatically (each chunk)'],
                 ['ar', 'Arabic'],
                 ['es', 'Spanish'],
                 ['fr', 'French'],
@@ -3428,6 +3711,35 @@ function settingsView(): Html {
               ></span
             >
           </label>
+          <label class="toggle">
+            <input
+              type="checkbox"
+              name="diarizationEnabled"
+              ${ui.db.settings.diarizationEnabled ? raw('checked') : ''}
+            />
+            <span
+              ><strong>Label other speakers</strong
+              ><small
+                >Groups system audio into Speaker A, B, … with a local voice
+                model. One label per chunk, so fast turn-taking can share
+                one.</small
+              ></span
+            >
+          </label>
+          <div class="settings-inline">
+            <span class="small-note" id="diarize-status"
+              >${diarizationStatus()}</span
+            >
+            <button
+              type="button"
+              class="ghost-btn small"
+              data-act="download-diarization"
+              id="diarize-download"
+              ${ui.ai.diarizationReady ? raw('disabled') : ''}
+            >
+              ${ui.ai.diarizationReady ? 'Downloaded' : 'Download model'}
+            </button>
+          </div>
           <label class="toggle">
             <input
               type="checkbox"
@@ -4833,6 +5145,9 @@ function onClick(event: MouseEvent): void {
     case 'download-stt':
       void downloadSttModel();
       return;
+    case 'download-diarization':
+      void downloadDiarizationModel();
+      return;
     case 'export-all': {
       const notes = ui.db.notes.filter((entry) => !entry.deletedAt);
       exportNotes(notes);
@@ -4956,8 +5271,12 @@ function onChange(event: Event): void {
     return;
   const kind = target.dataset.change;
 
-  if (kind === 'stt-source') {
-    updateSttSettings();
+  const settingsForm = target.closest<HTMLFormElement>(
+    'form[data-form="settings"]',
+  );
+  if (settingsForm) {
+    if (kind === 'stt-source') updateSttSettings();
+    void saveSettings(settingsForm, true);
     return;
   }
 
@@ -5019,16 +5338,6 @@ function onChange(event: Event): void {
     const thread = ui.db.threads.find((entry) => entry.id === ui.threadId);
     if (thread) thread.model = ui.chatModel;
     persist();
-    return;
-  }
-
-  if (kind === 'vad-sensitivity' && target instanceof HTMLInputElement) {
-    ui.db.settings.vadSensitivity = Number(target.value);
-    if (capture) capture.setSensitivity(ui.db.settings.vadSensitivity);
-    persist();
-    const valueEl = target.parentElement?.querySelector('.range-value');
-    if (valueEl)
-      valueEl.textContent = `${Math.round(ui.db.settings.vadSensitivity * 100)}%`;
     return;
   }
 
@@ -5357,7 +5666,9 @@ async function boot(): Promise<void> {
       if (!ui.sttDownload) return;
       ui.sttDownload = progress;
       updateSttSettings();
+      updateDiarizationSettings();
     });
+    window.api.onStreamText(handleStreamText);
 
     // Retry pending transcriptions from previous session
     void retryPendingChunks();

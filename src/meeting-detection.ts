@@ -8,6 +8,10 @@ export async function detectActiveMeeting(
   const current = pickActiveMeeting(calendarEvents);
   if (current) return current;
 
+  // On Wayland every enumeration opens the PipeWire picker and returns no
+  // window titles, so this fallback would only be a dialog every poll.
+  if (process.env.XDG_SESSION_TYPE === 'wayland') return null;
+
   // Fallback: Window enumeration for ad-hoc calls. These are banners only;
   // the renderer never auto-starts recording for them.
   try {

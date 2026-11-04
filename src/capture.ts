@@ -76,6 +76,11 @@ export class Capture {
     return this.running;
   }
 
+  /** Sources actually recording; system audio is absent when not shared. */
+  get sources(): Array<'mic' | 'system'> {
+    return this.loops.map((loop) => loop.source);
+  }
+
   async start(includeSystemAudio: boolean): Promise<void> {
     if (this.running) return;
     this.activeMs = 0;

@@ -10,6 +10,7 @@ import {
   encodeWav,
   LOCAL_STT_MODELS,
   type LocalSttSource,
+  type SttModelFile,
 } from './shared/logic.ts';
 import type { SttProgress } from './shared/types.ts';
 
@@ -27,7 +28,11 @@ function binaryPath(name: 'whisper-cli' | 'whisper-server'): string {
 }
 
 function localModelPath(dataDir: string, source: LocalSttSource): string {
-  return path.join(dataDir, 'models', LOCAL_STT_MODELS[source].file);
+  return modelPath(dataDir, LOCAL_STT_MODELS[source]);
+}
+
+function modelPath(dataDir: string, model: SttModelFile): string {
+  return path.join(dataDir, 'models', model.file);
 }
 
 export function localModelReady(
@@ -37,13 +42,21 @@ export function localModelReady(
   return fs.existsSync(localModelPath(dataDir, source));
 }
 
-export async function downloadLocalModel(
+export function downloadLocalModel(
   dataDir: string,
   source: LocalSttSource,
   onProgress: (progress: SttProgress) => void,
 ): Promise<void> {
-  const model = LOCAL_STT_MODELS[source];
-  const target = localModelPath(dataDir, source);
+  return downloadModel(dataDir, LOCAL_STT_MODELS[source], onProgress);
+}
+
+/** One download path for every model file: partial, resume-safe, size-checked. */
+export async function downloadModel(
+  dataDir: string,
+  model: SttModelFile,
+  onProgress: (progress: SttProgress) => void,
+): Promise<void> {
+  const target = modelPath(dataDir, model);
   const partial = `${target}.part`;
   fs.mkdirSync(path.dirname(target), { recursive: true });
   const response = await fetch(model.url);

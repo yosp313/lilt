@@ -171,6 +171,7 @@ export interface Settings {
   vadSensitivity: number;
   autoStartMeetingRecording: boolean;
   meetingDetectionEnabled: boolean;
+  diarizationEnabled: boolean;
 }
 
 export interface Store {
@@ -207,7 +208,9 @@ export type SttSource =
   | 'local-server'
   | 'whisper-small'
   | 'whisper-medium'
-  | 'whisper-large-v3-turbo';
+  | 'whisper-large-v3-turbo'
+  | 'whisper-large-v3'
+  | 'nemotron-streaming';
 
 export interface AiConfig {
   configured: boolean;
@@ -221,6 +224,7 @@ export interface AiConfig {
   sttModel: string;
   sttLanguage: string;
   keyStored: boolean;
+  diarizationReady: boolean;
 }
 
 export interface AiCompleteRequest {
@@ -242,6 +246,15 @@ export interface SttProgress {
   percent: number;
 }
 
+/** One update from the live engine: the stable prefix and the revisable tail. */
+export interface StreamTextEvent {
+  source: SpeakerSource;
+  committed: string;
+  tentative: string;
+  final: boolean;
+  error?: string;
+}
+
 export interface Api {
   load(): Promise<Store>;
   save(store: Store): Promise<{ savedAt: string }>;
@@ -260,6 +273,12 @@ export interface Api {
   transcribe(req: TranscribeRequest): Promise<{ text: string }>;
   sttDownload(source: SttSource): Promise<AiConfig>;
   onSttProgress(cb: (progress: SttProgress) => void): () => void;
+  streamStart(source: SpeakerSource, language: string): Promise<void>;
+  streamPush(source: SpeakerSource, pcm: Float32Array): void;
+  streamStop(source: SpeakerSource): Promise<void>;
+  onStreamText(cb: (event: StreamTextEvent) => void): () => void;
+  diarizationDownload(): Promise<AiConfig>;
+  diarize(pcm: Float32Array): Promise<Float32Array>;
   calendarStatus(): Promise<CalendarStatus>;
   calendarConnect(req: CalendarConnectRequest): Promise<CalendarStatus>;
   calendarDisconnect(): Promise<CalendarStatus>;
