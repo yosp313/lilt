@@ -150,3 +150,6 @@ vendor/
 
 # Rust build output for the streaming helper
 tools/*/target/
+
+# EGM (Elephant-Goldfish Model) experimental OpenCode bundle
+.egm-opencode/

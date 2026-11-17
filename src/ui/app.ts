@@ -644,7 +644,7 @@ async function stopLiveStreams(): Promise<void> {
   liveSources = [];
   // A chunk captured in the last second may still be decoding; the engine has
   // to see it before its input closes or the final words are lost.
-  await Promise.allSettled([...livePushes.values()]);
+  await Promise.allSettled(livePushes.values());
   for (const source of sources) {
     if (liveSources.includes(source)) continue;
     void window.api.streamStop(source);

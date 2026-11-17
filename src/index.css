@@ -1,43 +1,89 @@
 :root {
-  /* Material 3 tokens — source: DESIGN.md (m3.material.io baseline light). */
-  --md-sys-color-primary: #3f6b52;
-  --md-sys-color-on-primary: #ffffff;
-  --md-sys-color-primary-container: #c8e6c9;
-  --md-sys-color-on-primary-container: #1b5e20;
-  --md-sys-color-secondary: #625b71;
-  --md-sys-color-on-secondary: #ffffff;
-  --md-sys-color-secondary-container: #e8def8;
-  --md-sys-color-on-secondary-container: #1d192b;
-  --md-sys-color-tertiary: #7d5260;
-  --md-sys-color-on-tertiary: #ffffff;
-  --md-sys-color-tertiary-container: #ffd8e4;
-  --md-sys-color-on-tertiary-container: #31111d;
-  --md-sys-color-error: #b3261e;
-  --md-sys-color-on-error: #ffffff;
-  --md-sys-color-error-container: #f9dedc;
-  --md-sys-color-surface: #fffbfe;
-  --md-sys-color-on-surface: #1c1b1f;
-  --md-sys-color-surface-variant: #e7e0ec;
-  --md-sys-color-on-surface-variant: #49454f;
-  --md-sys-color-outline: #79747e;
-  --md-sys-color-surface-container-lowest: #fef8ff;
-  --md-sys-color-surface-container-low: #f7f2fa;
-  --md-sys-color-surface-container: #f3edf7;
-  --md-sys-color-surface-container-high: #ece6f0;
-  --md-sys-color-surface-container-highest: #e6e0e9;
+  /* HeroUI tokens — source: DESIGN.md (heroui.com), restated from public docs. */
+  --heroui-primary: #b08968; /* Primary actions */
+  --heroui-on-primary: #ffffff;
+  --heroui-primary-container: color-mix(
+    in srgb,
+    var(--heroui-primary) 10%,
+    var(--heroui-background)
+  );
+  --heroui-on-primary-container: color-mix(
+    in srgb,
+    var(--heroui-primary) 55%,
+    #000
+  );
 
-  /* Typography — Roboto per the M3 type specification. */
-  --font-display: 'Roboto', 'Helvetica Neue', Arial, sans-serif;
-  --font-body: 'Roboto', 'Helvetica Neue', Arial, sans-serif;
+  --heroui-secondary: #7828c8; /* Secondary accent */
+  --heroui-on-secondary: #ffffff;
+  --heroui-secondary-container: color-mix(
+    in srgb,
+    var(--heroui-secondary) 12%,
+    var(--heroui-background)
+  );
+  --heroui-on-secondary-container: color-mix(
+    in srgb,
+    var(--heroui-secondary) 55%,
+    #000
+  );
+
+  --heroui-foreground: #11181c; /* Primary text */
+  --heroui-background: #ffffff; /* Page background */
+  --heroui-content2: #f4f4f5; /* Subtle surface */
+  --heroui-default-300: #d4d4d8; /* Borders */
+  --heroui-success: #17c964;
+  --heroui-warning: #f5a524;
+  --heroui-danger: #f31260; /* Errors */
+  --heroui-on-danger: #ffffff;
+  --heroui-danger-container: color-mix(
+    in srgb,
+    var(--heroui-danger) 10%,
+    var(--heroui-background)
+  );
+  --heroui-warning-container: color-mix(
+    in srgb,
+    var(--heroui-warning) 16%,
+    var(--heroui-background)
+  );
+  --heroui-on-warning: color-mix(in srgb, var(--heroui-warning) 62%, #000);
+  --heroui-on-warning-container: var(--heroui-on-warning);
+
+  /* Neutral surface roles over the HeroUI background / content scale. */
+  --heroui-surface: var(--heroui-background);
+  --heroui-surface-variant: var(--heroui-content2);
+  --heroui-surface-container-lowest: var(--heroui-content2);
+  --heroui-surface-container-low: color-mix(
+    in srgb,
+    var(--heroui-content2) 90%,
+    var(--heroui-background)
+  );
+  --heroui-surface-container: color-mix(
+    in srgb,
+    var(--heroui-content2) 84%,
+    var(--heroui-background)
+  );
+  --heroui-surface-container-high: color-mix(
+    in srgb,
+    var(--heroui-content2) 76%,
+    var(--heroui-background)
+  );
+  --heroui-surface-container-highest: color-mix(
+    in srgb,
+    var(--heroui-content2) 70%,
+    var(--heroui-background)
+  );
+
+  /* Typography — Inter per the HeroUI type specification. */
+  --font-display: 'Inter', ui-sans-serif, system-ui, sans-serif;
+  --font-body: 'Inter', ui-sans-serif, system-ui, sans-serif;
   --font-mono: 'Roboto Mono', 'JetBrains Mono', ui-monospace, monospace;
 
-  /* Type scale (DESIGN.md reports native sp; web values chosen explicitly). */
-  --text-display-large: 57px;
-  --text-display-large-line-height: 64px;
-  --text-headline-large: 32px;
-  --text-headline-large-line-height: 40px;
-  --text-title-large: 22px;
-  --text-title-large-line-height: 28px;
+  /* Type scale (HeroUI). */
+  --text-display-large: 32px;
+  --text-display-large-line-height: 40px;
+  --text-headline-large: 24px;
+  --text-headline-large-line-height: 30px;
+  --text-title-large: 18px;
+  --text-title-large-line-height: 24px;
   --text-body-large: 16px;
   --text-body-large-line-height: 24px;
   --text-body-medium: 14px;
@@ -45,7 +91,7 @@
   --text-label-large: 14px;
   --text-label-large-line-height: 20px;
 
-  /* Spacing (4dp base). */
+  /* Spacing (4px base). */
   --space-1: 4px;
   --space-2: 8px;
   --space-3: 12px;
@@ -53,56 +99,50 @@
   --space-5: 24px;
   --space-6: 32px;
 
-  /* Corner radius. */
-  --radius-extra-small: 4px;
+  /* Corner radius — HeroUI. */
+  --radius-extra-small: 8px;
   --radius-small: 8px;
   --radius-medium: 12px;
-  --radius-large: 16px;
-  --radius-extra-large: 28px;
+  --radius-large: 14px;
+  --radius-extra-large: 14px;
   --radius-full: 9999px;
+  --radius: var(--radius-medium);
 
   /* Elevation. */
-  --shadow-elevation-1:
-    0 1px 2px rgba(0, 0, 0, 0.3), 0 1px 3px 1px rgba(0, 0, 0, 0.15);
-  --shadow-elevation-2:
-    0 1px 2px rgba(0, 0, 0, 0.3), 0 2px 6px 2px rgba(0, 0, 0, 0.15);
-  --shadow-elevation-3:
-    0 1px 3px rgba(0, 0, 0, 0.3), 0 4px 8px 3px rgba(0, 0, 0, 0.15);
+  --shadow-medium: 0 4px 12px 0 rgba(0, 0, 0, 0.08);
+  --shadow-elevation-1: 0 1px 3px rgba(0, 0, 0, 0.06);
+  --shadow-elevation-2: 0 4px 12px 0 rgba(0, 0, 0, 0.08);
+  --shadow-elevation-3: 0 12px 32px rgba(0, 0, 0, 0.16);
 
-  /* Motion. */
-  --motion-duration-short2: 100ms;
-  --motion-duration-medium2: 300ms;
-  --motion-easing-standard: cubic-bezier(0.2, 0, 0, 1);
+  /* Motion — HeroUI: 250ms ease. */
+  --motion-duration-default: 250ms;
+  --motion-easing-default: ease;
 
-  /* App semantic aliases over the M3 token set. */
-  --paper: var(--md-sys-color-surface-container-low);
-  --paper-raised: var(--md-sys-color-surface-container);
-  --surface: var(--md-sys-color-surface);
-  --surface-2: var(--md-sys-color-surface-container-low);
-  --ink: var(--md-sys-color-on-surface);
-  --ink-soft: var(--md-sys-color-on-surface-variant);
-  --muted: color-mix(in srgb, var(--md-sys-color-on-surface) 62%, transparent);
-  --faint: var(--md-sys-color-outline);
-  --line: color-mix(in srgb, var(--md-sys-color-outline) 40%, transparent);
-  --line-strong: color-mix(
-    in srgb,
-    var(--md-sys-color-outline) 70%,
-    transparent
-  );
-  --sage: var(--md-sys-color-primary);
-  --sage-deep: color-mix(in srgb, var(--md-sys-color-primary) 80%, #000);
-  --sage-soft: var(--md-sys-color-primary-container);
-  --sage-mist: var(--md-sys-color-surface-container-low);
-  --amber: var(--md-sys-color-tertiary);
-  --danger: var(--md-sys-color-error);
+  /* App semantic aliases over the HeroUI token set. */
+  --paper: var(--heroui-surface-container-low);
+  --paper-raised: var(--heroui-surface-container);
+  --surface: var(--heroui-surface);
+  --surface-2: var(--heroui-surface-container-low);
+  --ink: var(--heroui-foreground);
+  --ink-soft: color-mix(in srgb, var(--heroui-foreground) 66%, transparent);
+  --muted: color-mix(in srgb, var(--heroui-foreground) 56%, transparent);
+  --faint: var(--heroui-default-300);
+  --line: color-mix(in srgb, var(--heroui-foreground) 14%, transparent);
+  --line-strong: color-mix(in srgb, var(--heroui-foreground) 26%, transparent);
+  --sage: var(--heroui-primary);
+  --sage-deep: color-mix(in srgb, var(--heroui-primary) 80%, #000);
+  --sage-soft: var(--heroui-primary-container);
+  --sage-mist: var(--heroui-content2);
+  --amber: var(--heroui-warning);
+  --danger: var(--heroui-danger);
   --radius: var(--radius-medium);
 
   /* Dark app chrome (rail, overlays). */
-  --rail: #201e1a;
-  --rail-2: #2b2823;
-  --rail-3: #333029;
-  --rail-text: #ece5d8;
-  --rail-muted: #a79d8f;
+  --rail: #18181b;
+  --rail-2: #27272a;
+  --rail-3: #3f3f46;
+  --rail-text: #fafafa;
+  --rail-muted: #a1a1aa;
   --avatar-hue: 96;
 }
 
@@ -119,7 +159,7 @@ body {
   margin: 0;
   background: var(--paper-raised);
   color: var(--ink);
-  font-family: var(--sans);
+  font-family: var(--font-body);
   font-size: 14px;
   line-height: 1.5;
   -webkit-font-smoothing: antialiased;
@@ -156,16 +196,16 @@ select {
   padding: 8px 10px;
   outline: none;
   transition:
-    border-color 0.3s var(--motion-easing-standard),
-    box-shadow 0.3s var(--motion-easing-standard);
+    border-color 0.3s var(--motion-easing-default),
+    box-shadow 0.3s var(--motion-easing-default);
 }
 
 input:focus,
 textarea:focus,
 select:focus {
-  border-color: var(--md-sys-color-primary);
+  border-color: var(--heroui-primary);
   box-shadow: 0 0 0 3px
-    color-mix(in srgb, var(--md-sys-color-primary) 16%, transparent);
+    color-mix(in srgb, var(--heroui-primary) 16%, transparent);
 }
 
 textarea {
@@ -173,8 +213,8 @@ textarea {
 }
 
 ::selection {
-  background: var(--md-sys-color-primary-container);
-  color: var(--md-sys-color-on-primary-container);
+  background: var(--heroui-primary-container);
+  color: var(--heroui-on-primary-container);
 }
 
 .icon {
@@ -193,7 +233,7 @@ kbd {
 }
 
 :focus-visible {
-  outline: 2px solid var(--md-sys-color-primary);
+  outline: 2px solid var(--heroui-primary);
   outline-offset: 2px;
 }
 
@@ -311,9 +351,9 @@ kbd {
 .brand-mark {
   display: grid;
   place-items: center;
-  border-radius: 8px;
-  background: #dfe8d8;
-  color: #2c4d39;
+  border-radius: var(--radius-small);
+  background: var(--heroui-primary-container);
+  color: var(--heroui-primary);
   flex: none;
 }
 
@@ -321,8 +361,8 @@ kbd {
   display: flex;
   align-items: center;
   gap: 8px;
-  background: var(--md-sys-color-primary-container);
-  color: var(--md-sys-color-on-primary-container);
+  background: var(--heroui-primary-container);
+  color: var(--heroui-on-primary-container);
   border-radius: var(--radius-full);
   padding: 9px 11px;
   font-size: 12.5px;
@@ -330,23 +370,19 @@ kbd {
 }
 
 .new-note-btn:hover {
-  background: color-mix(
-    in srgb,
-    var(--md-sys-color-primary-container) 85%,
-    #000
-  );
+  background: color-mix(in srgb, var(--heroui-primary-container) 85%, #000);
 }
 
 .new-note-btn kbd {
   margin-left: auto;
   color: color-mix(
     in srgb,
-    var(--md-sys-color-on-primary-container) 70%,
+    var(--heroui-on-primary-container) 70%,
     transparent
   );
   border-color: color-mix(
     in srgb,
-    var(--md-sys-color-on-primary-container) 30%,
+    var(--heroui-on-primary-container) 30%,
     transparent
   );
   background: rgba(255, 255, 255, 0.35);
@@ -696,8 +732,8 @@ kbd {
   margin: 0 11px 8px;
   padding: 5px 7px;
   border-radius: var(--radius-small);
-  background: var(--md-sys-color-primary);
-  color: var(--md-sys-color-on-primary);
+  background: var(--heroui-primary);
+  color: var(--heroui-on-primary);
   font-size: 10.5px;
 }
 
@@ -708,16 +744,12 @@ kbd {
 }
 
 .bulk-bar .tiny-btn {
-  color: var(--md-sys-color-on-primary);
+  color: var(--heroui-on-primary);
 }
 
 .bulk-bar .tiny-btn:hover {
-  background: color-mix(
-    in srgb,
-    var(--md-sys-color-on-primary) 12%,
-    transparent
-  );
-  color: var(--md-sys-color-on-primary);
+  background: color-mix(in srgb, var(--heroui-on-primary) 12%, transparent);
+  color: var(--heroui-on-primary);
 }
 
 .note-list {
@@ -758,12 +790,12 @@ kbd {
 }
 
 .note-row:hover {
-  background: var(--md-sys-color-surface-container-low);
+  background: var(--heroui-surface-container-low);
 }
 
 .note-row.active {
   background: var(--surface);
-  border-color: var(--md-sys-color-outline);
+  border-color: var(--line);
   box-shadow: var(--shadow-elevation-1);
 }
 
@@ -829,7 +861,7 @@ kbd {
   gap: 4px;
   margin-top: 6px;
   font-size: 9.5px;
-  color: var(--md-sys-color-on-surface-variant);
+  color: var(--ink-soft);
   min-width: 0;
 }
 
@@ -844,8 +876,8 @@ kbd {
   max-width: 120px;
   padding: 1px 6px;
   border-radius: var(--radius-full);
-  background: var(--md-sys-color-surface-container-high);
-  color: var(--md-sys-color-on-surface-variant);
+  background: var(--heroui-surface-container-high);
+  color: var(--ink-soft);
   font-size: 9px;
   font-weight: 600;
   white-space: nowrap;
@@ -860,8 +892,8 @@ kbd {
   flex: none;
   padding: 1px 6px;
   border-radius: var(--radius-full);
-  background: var(--md-sys-color-primary-container);
-  color: var(--md-sys-color-on-primary-container);
+  background: var(--heroui-primary-container);
+  color: var(--heroui-on-primary-container);
   font-size: 9px;
   font-weight: 650;
   letter-spacing: 0.03em;
@@ -972,10 +1004,10 @@ kbd {
   font-weight: 650;
   white-space: nowrap;
   transition:
-    background 0.3s var(--motion-easing-standard),
-    border-color 0.3s var(--motion-easing-standard),
-    box-shadow 0.3s var(--motion-easing-standard),
-    transform 0.1s var(--motion-easing-standard);
+    background 0.3s var(--motion-easing-default),
+    border-color 0.3s var(--motion-easing-default),
+    box-shadow 0.3s var(--motion-easing-default),
+    transform 0.1s var(--motion-easing-default);
 }
 
 .stop-btn,
@@ -985,11 +1017,11 @@ kbd {
 .tiny-btn,
 .icon-btn {
   transition:
-    background 0.3s var(--motion-easing-standard),
-    border-color 0.3s var(--motion-easing-standard),
-    box-shadow 0.3s var(--motion-easing-standard),
-    color 0.3s var(--motion-easing-standard),
-    transform 0.1s var(--motion-easing-standard);
+    background 0.3s var(--motion-easing-default),
+    border-color 0.3s var(--motion-easing-default),
+    box-shadow 0.3s var(--motion-easing-default),
+    color 0.3s var(--motion-easing-default),
+    transform 0.1s var(--motion-easing-default);
 }
 
 .primary-btn:active,
@@ -1007,23 +1039,23 @@ kbd {
 }
 
 .primary-btn {
-  background: var(--md-sys-color-primary);
-  color: var(--md-sys-color-on-primary);
+  background: var(--heroui-primary);
+  color: var(--heroui-on-primary);
 }
 
 .primary-btn:hover {
-  background: color-mix(in srgb, var(--md-sys-color-primary) 86%, #000);
+  background: color-mix(in srgb, var(--heroui-primary) 86%, #000);
 }
 
 .ghost-btn {
-  background: var(--md-sys-color-surface);
-  border: 1px solid var(--md-sys-color-outline);
-  color: var(--md-sys-color-on-surface);
+  background: var(--heroui-surface);
+  border: 1px solid var(--line);
+  color: var(--ink);
 }
 
 .ghost-btn:hover {
-  border-color: var(--md-sys-color-primary);
-  background: var(--md-sys-color-primary-container);
+  border-color: var(--heroui-primary);
+  background: var(--heroui-primary-container);
 }
 
 .ghost-btn.small {
@@ -1032,21 +1064,21 @@ kbd {
 }
 
 .danger-btn {
-  background: var(--md-sys-color-error);
-  color: var(--md-sys-color-on-error);
+  background: var(--heroui-danger);
+  color: var(--heroui-on-danger);
 }
 
 .danger-btn:hover {
-  background: color-mix(in srgb, var(--md-sys-color-error) 88%, #000);
+  background: color-mix(in srgb, var(--heroui-danger) 88%, #000);
 }
 
 .ghost-btn.danger-outline {
-  color: var(--md-sys-color-error);
-  border-color: color-mix(in srgb, var(--md-sys-color-error) 40%, transparent);
+  color: var(--heroui-danger);
+  border-color: color-mix(in srgb, var(--heroui-danger) 40%, transparent);
 }
 
 .ghost-btn.danger-outline:hover {
-  background: var(--md-sys-color-error-container);
+  background: var(--heroui-danger-container);
 }
 
 .text-btn {
@@ -1055,24 +1087,24 @@ kbd {
   gap: 4px;
   font-size: 10.5px;
   font-weight: 600;
-  color: var(--md-sys-color-primary);
+  color: var(--heroui-primary);
 }
 
 .text-btn:hover {
-  color: color-mix(in srgb, var(--md-sys-color-primary) 80%, #000);
+  color: color-mix(in srgb, var(--heroui-primary) 80%, #000);
   text-decoration: underline;
   text-underline-offset: 2px;
 }
 
 .link-btn {
-  color: var(--md-sys-color-primary);
+  color: var(--heroui-primary);
   font-size: inherit;
   text-decoration: underline;
   text-underline-offset: 2px;
 }
 
 .danger-text {
-  color: var(--md-sys-color-error);
+  color: var(--heroui-danger);
 }
 
 .tiny-btn {
@@ -1086,22 +1118,18 @@ kbd {
 }
 
 .tiny-btn:hover {
-  background: color-mix(
-    in srgb,
-    var(--md-sys-color-on-surface) 7%,
-    transparent
-  );
-  color: var(--md-sys-color-on-surface);
+  background: color-mix(in srgb, var(--ink) 7%, transparent);
+  color: var(--ink);
 }
 
 .tiny-btn.on {
-  background: var(--md-sys-color-on-surface);
-  color: var(--md-sys-color-primary-container);
+  background: var(--ink);
+  color: var(--heroui-primary-container);
 }
 
 .tiny-btn.danger:hover {
-  background: color-mix(in srgb, var(--md-sys-color-error) 12%, transparent);
-  color: var(--md-sys-color-error);
+  background: color-mix(in srgb, var(--heroui-danger) 12%, transparent);
+  color: var(--heroui-danger);
 }
 
 .icon-btn {
@@ -1113,18 +1141,14 @@ kbd {
   color: var(--faint);
   flex: none;
   transition:
-    background 0.3s var(--motion-easing-standard),
-    color 0.3s var(--motion-easing-standard),
-    transform 0.1s var(--motion-easing-standard);
+    background 0.3s var(--motion-easing-default),
+    color 0.3s var(--motion-easing-default),
+    transform 0.1s var(--motion-easing-default);
 }
 
 .icon-btn:hover {
-  background: color-mix(
-    in srgb,
-    var(--md-sys-color-on-surface) 7%,
-    transparent
-  );
-  color: var(--md-sys-color-on-surface);
+  background: color-mix(in srgb, var(--ink) 7%, transparent);
+  color: var(--ink);
 }
 
 .small-note {
@@ -1137,7 +1161,7 @@ kbd {
   margin-top: 30px;
   padding: 54px 28px;
   border: 1px dashed var(--line-strong);
-  border-radius: 16px;
+  border-radius: var(--radius-large);
   display: flex;
   flex-direction: column;
   align-items: center;
@@ -1196,17 +1220,17 @@ kbd {
   gap: 3px;
   padding: 14px 15px 12px;
   border-radius: var(--radius-medium);
-  border: 1px solid var(--md-sys-color-outline);
-  background: var(--md-sys-color-surface);
+  border: 1px solid var(--line);
+  background: var(--heroui-surface);
   text-align: left;
   position: relative;
   transition:
-    box-shadow 0.3s var(--motion-easing-standard),
-    border-color 0.3s var(--motion-easing-standard);
+    box-shadow 0.3s var(--motion-easing-default),
+    border-color 0.3s var(--motion-easing-default);
 }
 
 .stat-card:hover {
-  border-color: var(--md-sys-color-primary);
+  border-color: var(--heroui-primary);
   box-shadow: var(--shadow-elevation-1);
 }
 
@@ -1240,12 +1264,8 @@ kbd {
 }
 
 .stat-card.accent {
-  background: var(--md-sys-color-primary-container);
-  border-color: color-mix(
-    in srgb,
-    var(--md-sys-color-primary) 30%,
-    transparent
-  );
+  background: var(--heroui-primary-container);
+  border-color: color-mix(in srgb, var(--heroui-primary) 30%, transparent);
 }
 
 .home-section {
@@ -1287,19 +1307,19 @@ kbd {
   min-height: 148px;
   padding: 15px 16px;
   border-radius: var(--radius-medium);
-  border: 1px solid var(--md-sys-color-outline);
-  background: var(--md-sys-color-surface);
+  border: 1px solid var(--line);
+  background: var(--heroui-surface);
   text-align: left;
   transition:
-    transform 0.3s var(--motion-easing-standard),
-    box-shadow 0.3s var(--motion-easing-standard),
-    border-color 0.3s var(--motion-easing-standard);
+    transform 0.3s var(--motion-easing-default),
+    box-shadow 0.3s var(--motion-easing-default),
+    border-color 0.3s var(--motion-easing-default);
 }
 
 @media (hover: hover) and (pointer: fine) {
   .note-card:hover {
     transform: translateY(-1px);
-    border-color: var(--md-sys-color-primary);
+    border-color: var(--heroui-primary);
     box-shadow: var(--shadow-elevation-2);
   }
 }
@@ -1363,11 +1383,7 @@ kbd {
 }
 
 .latest-row:hover {
-  background: color-mix(
-    in srgb,
-    var(--md-sys-color-on-surface) 4%,
-    transparent
-  );
+  background: color-mix(in srgb, var(--ink) 4%, transparent);
 }
 
 .latest-title {
@@ -1398,8 +1414,8 @@ kbd {
   margin-top: 42px;
   padding: 17px 18px;
   border-radius: var(--radius-medium);
-  background: var(--md-sys-color-surface-container-low);
-  border: 1px solid var(--md-sys-color-outline);
+  background: var(--heroui-surface-container-low);
+  border: 1px solid var(--line);
 }
 
 .privacy-icon {
@@ -1409,8 +1425,8 @@ kbd {
   place-items: center;
   flex: none;
   border-radius: var(--radius-small);
-  background: var(--md-sys-color-primary-container);
-  color: var(--md-sys-color-primary);
+  background: var(--heroui-primary-container);
+  color: var(--heroui-primary);
 }
 
 .privacy-card h3 {
@@ -1499,19 +1515,18 @@ kbd {
   padding: 9px 13px;
   margin-bottom: 18px;
   border-radius: var(--radius-medium);
-  background: var(--md-sys-color-primary-container);
-  border: 1px solid
-    color-mix(in srgb, var(--md-sys-color-primary) 30%, transparent);
+  background: var(--heroui-primary-container);
+  border: 1px solid color-mix(in srgb, var(--heroui-primary) 30%, transparent);
 }
 
 .rec-dot {
   width: 8px;
   height: 8px;
   border-radius: 50%;
-  background: var(--md-sys-color-primary);
+  background: var(--heroui-primary);
   box-shadow: 0 0 0 4px
-    color-mix(in srgb, var(--md-sys-color-primary) 14%, transparent);
-  animation: pulse 1.8s var(--motion-easing-standard) infinite;
+    color-mix(in srgb, var(--heroui-primary) 14%, transparent);
+  animation: pulse 1.8s var(--motion-easing-default) infinite;
   flex: none;
 }
 
@@ -1525,11 +1540,11 @@ kbd {
   0%,
   100% {
     box-shadow: 0 0 0 3px
-      color-mix(in srgb, var(--md-sys-color-primary) 12%, transparent);
+      color-mix(in srgb, var(--heroui-primary) 12%, transparent);
   }
   50% {
     box-shadow: 0 0 0 6px
-      color-mix(in srgb, var(--md-sys-color-primary) 7%, transparent);
+      color-mix(in srgb, var(--heroui-primary) 7%, transparent);
   }
 }
 
@@ -1538,14 +1553,14 @@ kbd {
   font-size: 12.5px;
   font-variant-numeric: tabular-nums;
   font-weight: 600;
-  color: var(--md-sys-color-primary);
+  color: var(--heroui-primary);
 }
 
 .rec-state {
   font-size: 9.5px;
   text-transform: uppercase;
   letter-spacing: 0.1em;
-  color: var(--md-sys-color-primary);
+  color: var(--heroui-primary);
   font-weight: 650;
 }
 
@@ -1558,14 +1573,14 @@ kbd {
 
 .level-label {
   font-size: 9px;
-  color: color-mix(in srgb, var(--md-sys-color-primary) 65%, transparent);
+  color: color-mix(in srgb, var(--heroui-primary) 65%, transparent);
 }
 
 .level-track {
   width: 46px;
   height: 4px;
   border-radius: var(--radius-full);
-  background: color-mix(in srgb, var(--md-sys-color-primary) 16%, transparent);
+  background: color-mix(in srgb, var(--heroui-primary) 16%, transparent);
   overflow: hidden;
 }
 
@@ -1574,7 +1589,7 @@ kbd {
   height: 100%;
   width: 100%;
   border-radius: inherit;
-  background: var(--md-sys-color-primary);
+  background: var(--heroui-primary);
   transform: scaleX(0.04);
   transform-origin: left center;
   transition: transform 0.09s linear;
@@ -1588,16 +1603,16 @@ kbd {
   width: 27px;
   height: 27px;
   border-radius: 50%;
-  background: var(--md-sys-color-surface);
-  border: 1px solid var(--md-sys-color-outline);
+  background: var(--heroui-surface);
+  border: 1px solid var(--line);
   display: grid;
   place-items: center;
-  color: var(--md-sys-color-on-surface);
+  color: var(--ink);
 }
 
 .round-btn:hover {
-  border-color: var(--md-sys-color-primary);
-  background: var(--md-sys-color-primary-container);
+  border-color: var(--heroui-primary);
+  background: var(--heroui-primary-container);
 }
 
 .stop-btn {
@@ -1606,14 +1621,14 @@ kbd {
   gap: 5px;
   padding: 6px 10px;
   border-radius: var(--radius-full);
-  background: var(--md-sys-color-primary);
-  color: var(--md-sys-color-on-primary);
+  background: var(--heroui-primary);
+  color: var(--heroui-on-primary);
   font-size: 10.5px;
   font-weight: 650;
 }
 
 .stop-btn:hover {
-  background: color-mix(in srgb, var(--md-sys-color-primary) 86%, #000);
+  background: color-mix(in srgb, var(--heroui-primary) 86%, #000);
 }
 
 .start-card {
@@ -1623,14 +1638,13 @@ kbd {
   margin-bottom: 22px;
   padding: 18px 20px;
   border-radius: var(--radius-medium);
-  border: 1px solid
-    color-mix(in srgb, var(--md-sys-color-primary) 30%, transparent);
-  background: var(--md-sys-color-primary-container);
+  border: 1px solid color-mix(in srgb, var(--heroui-primary) 30%, transparent);
+  background: var(--heroui-primary-container);
 }
 
 .start-card.compact {
   padding: 12px 18px;
-  background: var(--md-sys-color-surface-container-low);
+  background: var(--heroui-surface-container-low);
   border-color: var(--line);
 }
 
@@ -1683,13 +1697,13 @@ kbd {
 }
 
 .record-btn {
-  background: var(--md-sys-color-primary);
-  color: var(--md-sys-color-on-primary);
+  background: var(--heroui-primary);
+  color: var(--heroui-on-primary);
   padding: 9px 14px;
 }
 
 .record-btn:hover {
-  background: color-mix(in srgb, var(--md-sys-color-primary) 86%, #000);
+  background: color-mix(in srgb, var(--heroui-primary) 86%, #000);
 }
 
 .note-heading {
@@ -1708,7 +1722,7 @@ kbd {
   line-height: 1.13;
   font-weight: 600;
   letter-spacing: -0.025em;
-  color: var(--md-sys-color-on-surface);
+  color: var(--ink);
 }
 
 .note-title:focus {
@@ -1732,19 +1746,19 @@ kbd {
   align-items: center;
   gap: 3px;
   padding: 1px 6px;
-  border-radius: 99px;
+  border-radius: var(--radius-full);
   font-size: 9px;
   font-weight: 600;
 }
 
 .shared-chip {
-  background: var(--md-sys-color-primary-container);
-  color: var(--md-sys-color-on-primary-container);
+  background: var(--heroui-primary-container);
+  color: var(--heroui-on-primary-container);
 }
 
 .generated-chip {
-  background: var(--md-sys-color-surface-container-high);
-  color: var(--md-sys-color-on-surface-variant);
+  background: var(--heroui-surface-container-high);
+  color: var(--ink-soft);
 }
 
 .attendees-input {
@@ -1766,7 +1780,7 @@ kbd {
 }
 
 .attendees-input:focus {
-  border-bottom-color: var(--md-sys-color-primary);
+  border-bottom-color: var(--heroui-primary);
   box-shadow: none;
 }
 
@@ -1794,7 +1808,7 @@ kbd {
   flex: 1;
   padding: 2px;
   border-radius: var(--radius-full);
-  background: var(--md-sys-color-surface-container-high);
+  background: var(--heroui-surface-container-high);
 }
 
 .tab {
@@ -1805,39 +1819,31 @@ kbd {
   border-radius: var(--radius-full);
   font-size: 11px;
   font-weight: 600;
-  color: var(--md-sys-color-on-surface-variant);
+  color: var(--ink-soft);
 }
 
 .tab:hover {
-  background: color-mix(
-    in srgb,
-    var(--md-sys-color-on-surface) 6%,
-    transparent
-  );
-  color: var(--md-sys-color-on-surface);
+  background: color-mix(in srgb, var(--ink) 6%, transparent);
+  color: var(--ink);
 }
 
 .tab.active {
-  background: var(--md-sys-color-primary-container);
-  color: var(--md-sys-color-on-primary-container);
+  background: var(--heroui-primary-container);
+  color: var(--heroui-on-primary-container);
 }
 
 .inline-count {
   font-size: 9px;
   padding: 0 4px;
   border-radius: var(--radius-full);
-  background: color-mix(
-    in srgb,
-    var(--md-sys-color-on-surface) 8%,
-    transparent
-  );
+  background: color-mix(in srgb, var(--ink) 8%, transparent);
   color: inherit;
 }
 
 .tab.active .inline-count {
   background: color-mix(
     in srgb,
-    var(--md-sys-color-on-primary-container) 18%,
+    var(--heroui-on-primary-container) 18%,
     transparent
   );
 }
@@ -1858,14 +1864,14 @@ kbd {
 }
 
 .enhance-btn {
-  background: var(--md-sys-color-primary);
-  color: var(--md-sys-color-on-primary);
+  background: var(--heroui-primary);
+  color: var(--heroui-on-primary);
   padding: 6px 10px;
   font-size: 10.5px;
 }
 
 .enhance-btn:hover {
-  background: color-mix(in srgb, var(--md-sys-color-primary) 86%, #000);
+  background: color-mix(in srgb, var(--heroui-primary) 86%, #000);
 }
 
 .enhance-btn.large {
@@ -1896,8 +1902,8 @@ kbd {
   margin: 12px 0 2px;
   padding: 7px 10px;
   border-radius: var(--radius-small);
-  background: var(--md-sys-color-primary-container);
-  color: var(--md-sys-color-on-primary-container);
+  background: var(--heroui-primary-container);
+  color: var(--heroui-on-primary-container);
   font-size: 10px;
   line-height: 1.45;
 }
@@ -1918,7 +1924,7 @@ kbd {
 
 .enh-section h2:focus {
   outline: none;
-  background: var(--md-sys-color-primary-container);
+  background: var(--heroui-primary-container);
 }
 
 .enh-section ul {
@@ -1942,7 +1948,7 @@ kbd {
   width: 4px;
   height: 4px;
   border-radius: 50%;
-  background: var(--md-sys-color-primary);
+  background: var(--heroui-primary);
   margin-top: 9px;
   flex: none;
 }
@@ -1957,7 +1963,7 @@ kbd {
 
 .bullet-text:focus {
   outline: none;
-  background: var(--md-sys-color-primary-container);
+  background: var(--heroui-primary-container);
 }
 
 .source {
@@ -1973,7 +1979,7 @@ kbd {
   display: grid;
   place-items: center;
   border-radius: 50%;
-  color: var(--md-sys-color-on-surface-variant);
+  color: var(--ink-soft);
   cursor: pointer;
   opacity: 0.65;
 }
@@ -1983,8 +1989,8 @@ kbd {
 }
 
 .source summary:hover {
-  background: var(--md-sys-color-surface-container-high);
-  color: var(--md-sys-color-primary);
+  background: var(--heroui-surface-container-high);
+  color: var(--heroui-primary);
   opacity: 1;
 }
 
@@ -2000,7 +2006,7 @@ kbd {
   width: 290px;
   max-width: 60vw;
   padding: 10px 12px;
-  border-radius: 10px;
+  border-radius: var(--radius-small);
   background: var(--surface);
   border: 1px solid var(--line-strong);
   box-shadow: 0 12px 30px rgba(35, 32, 25, 0.14);
@@ -2049,7 +2055,7 @@ kbd {
   padding: 28px 30px;
   border-radius: var(--radius-medium);
   border: 1px dashed var(--line-strong);
-  background: var(--md-sys-color-surface-container-low);
+  background: var(--heroui-surface-container-low);
   display: flex;
   flex-direction: column;
   align-items: flex-start;
@@ -2062,8 +2068,8 @@ kbd {
   border-radius: var(--radius-small);
   display: grid;
   place-items: center;
-  background: var(--md-sys-color-primary-container);
-  color: var(--md-sys-color-primary);
+  background: var(--heroui-primary-container);
+  color: var(--heroui-primary);
   margin-bottom: 2px;
 }
 
@@ -2087,7 +2093,7 @@ kbd {
   padding: 18px;
   border: 1px solid var(--line);
   border-radius: var(--radius-medium);
-  background: var(--md-sys-color-surface);
+  background: var(--heroui-surface);
 }
 
 .loading-head {
@@ -2096,7 +2102,7 @@ kbd {
   gap: 8px;
   margin-bottom: 15px;
   font-size: 11.5px;
-  color: var(--md-sys-color-primary);
+  color: var(--heroui-primary);
   font-weight: 600;
 }
 
@@ -2106,9 +2112,9 @@ kbd {
   margin: 9px 0;
   background: linear-gradient(
     90deg,
-    var(--md-sys-color-surface-container-high) 25%,
-    var(--md-sys-color-surface-container-low) 50%,
-    var(--md-sys-color-surface-container-high) 75%
+    var(--heroui-surface-container-high) 25%,
+    var(--heroui-surface-container-low) 50%,
+    var(--heroui-surface-container-high) 75%
   );
   background-size: 200% 100%;
   animation: shimmer 1.4s linear infinite;
@@ -2141,10 +2147,10 @@ kbd {
   width: 100%;
   min-height: 330px;
   padding: 16px 18px;
-  border-radius: 11px;
+  border-radius: var(--radius-small);
   border: 1px solid var(--line);
   background: var(--surface);
-  font-family: var(--sans);
+  font-family: var(--font-body);
   font-size: 13px;
   line-height: 1.72;
   color: var(--ink-soft);
@@ -2215,7 +2221,7 @@ kbd {
   padding: 8px 11px;
   border-radius: var(--radius-medium);
   position: relative;
-  background: var(--md-sys-color-surface-container-high);
+  background: var(--heroui-surface-container-high);
 }
 
 .seg.them {
@@ -2225,7 +2231,8 @@ kbd {
 
 .seg.me {
   margin-left: auto;
-  background: var(--md-sys-color-primary-container);
+  background: var(--heroui-primary);
+  color: var(--heroui-on-primary);
   border-bottom-right-radius: var(--radius-extra-small);
 }
 
@@ -2235,12 +2242,12 @@ kbd {
   gap: 6px;
   margin-bottom: 2px;
   font-size: 8.5px;
-  color: var(--md-sys-color-on-surface-variant);
+  color: var(--ink-soft);
 }
 
 .seg-speaker {
   font-weight: 650;
-  color: var(--md-sys-color-on-surface-variant);
+  color: var(--ink-soft);
 }
 
 .seg-actions {
@@ -2322,7 +2329,7 @@ kbd {
 
 .transcript-empty.large {
   border: 1px dashed var(--line-strong);
-  border-radius: 12px;
+  border-radius: var(--radius-medium);
   margin-top: 10px;
   padding: 46px 20px;
 }
@@ -2349,8 +2356,8 @@ kbd {
   padding: 8px 10px;
   margin: 6px 2px 8px;
   border-radius: var(--radius-small);
-  background: var(--md-sys-color-tertiary-container);
-  color: var(--md-sys-color-on-tertiary-container);
+  background: var(--heroui-warning-container);
+  color: var(--heroui-on-warning-container);
   font-size: 10px;
   line-height: 1.45;
 }
@@ -2375,9 +2382,9 @@ kbd {
   display: flex;
   flex-direction: column;
   min-height: 0;
-  border: 1px solid var(--md-sys-color-outline);
+  border: 1px solid var(--line);
   border-radius: var(--radius-medium);
-  background: var(--md-sys-color-surface);
+  background: var(--heroui-surface);
   overflow: hidden;
 }
 
@@ -2389,7 +2396,7 @@ kbd {
   border-bottom: 1px solid var(--line);
   font-size: 10px;
   font-weight: 650;
-  color: var(--md-sys-color-on-surface);
+  color: var(--ink);
   flex: none;
 }
 
@@ -2445,14 +2452,14 @@ kbd {
   gap: 11px;
   padding: 13px 14px;
   border-radius: var(--radius-medium);
-  border: 1px solid var(--md-sys-color-outline);
-  background: var(--md-sys-color-surface);
-  color: var(--md-sys-color-on-surface);
+  border: 1px solid var(--line);
+  background: var(--heroui-surface);
+  color: var(--ink);
 }
 
 .person-card:hover {
-  border-color: var(--md-sys-color-primary);
-  background: var(--md-sys-color-surface);
+  border-color: var(--heroui-primary);
+  background: var(--heroui-surface);
 }
 
 .person-copy {
@@ -2487,8 +2494,8 @@ kbd {
   gap: 7px;
   padding: 15px 16px;
   border-radius: var(--radius-medium);
-  border: 1px solid var(--md-sys-color-outline);
-  background: var(--md-sys-color-surface);
+  border: 1px solid var(--line);
+  background: var(--heroui-surface);
   min-height: 168px;
 }
 
@@ -2513,8 +2520,8 @@ kbd {
 .scope-badge {
   padding: 1px 6px;
   border-radius: var(--radius-full);
-  background: var(--md-sys-color-primary-container);
-  color: var(--md-sys-color-on-primary-container);
+  background: var(--heroui-primary-container);
+  color: var(--heroui-on-primary-container);
   font-size: 8.5px;
   font-weight: 650;
   text-transform: uppercase;
@@ -2539,8 +2546,8 @@ kbd {
   margin-top: 26px;
   padding: 14px 16px;
   border-radius: var(--radius-medium);
-  background: var(--md-sys-color-surface-container-low);
-  color: var(--md-sys-color-on-surface-variant);
+  background: var(--heroui-surface-container-low);
+  color: var(--ink-soft);
 }
 
 .tip-card p {
@@ -2551,7 +2558,7 @@ kbd {
 }
 
 .tip-card strong {
-  color: var(--md-sys-color-on-surface);
+  color: var(--ink);
 }
 
 /* ---------------------------------------------------------------- settings */
@@ -2569,8 +2576,8 @@ kbd {
 .settings-section {
   padding: 20px 22px;
   border-radius: var(--radius-medium);
-  border: 1px solid var(--md-sys-color-outline);
-  background: var(--md-sys-color-surface);
+  border: 1px solid var(--line);
+  background: var(--heroui-surface);
   margin-bottom: 16px;
 }
 
@@ -2608,8 +2615,8 @@ kbd {
   gap: 5px;
   padding: 3px 8px;
   border-radius: var(--radius-full);
-  background: var(--md-sys-color-surface-container-high);
-  color: var(--md-sys-color-on-surface-variant);
+  background: var(--heroui-surface-container-high);
+  color: var(--ink-soft);
   font-size: 9px;
   font-weight: 650;
   text-transform: uppercase;
@@ -2618,8 +2625,8 @@ kbd {
 }
 
 .status-pill.good {
-  background: var(--md-sys-color-primary-container);
-  color: var(--md-sys-color-on-primary-container);
+  background: var(--heroui-primary-container);
+  color: var(--heroui-on-primary-container);
 }
 
 .status-dot {
@@ -2708,7 +2715,7 @@ kbd {
 }
 
 .toggle:hover {
-  background: var(--md-sys-color-surface-container-low);
+  background: var(--heroui-surface-container-low);
 }
 
 .toggle input {
@@ -2788,11 +2795,11 @@ kbd {
   flex: none;
   padding: 1px 6px;
   border-radius: var(--radius-full);
-  background: var(--md-sys-color-surface-container-high);
+  background: var(--heroui-surface-container-high);
   font-size: 8.5px !important;
   text-transform: uppercase;
   letter-spacing: 0.05em;
-  color: var(--md-sys-color-on-surface-variant);
+  color: var(--ink-soft);
 }
 
 .about-meta {
@@ -2825,10 +2832,10 @@ kbd {
   max-width: 92vw;
   display: flex;
   flex-direction: column;
-  background: var(--md-sys-color-surface-container-low);
-  border-left: 1px solid var(--md-sys-color-outline);
+  background: var(--heroui-surface-container-low);
+  border-left: 1px solid var(--line);
   box-shadow: -18px 0 50px rgba(35, 32, 25, 0.12);
-  animation: chat-in 0.18s var(--motion-easing-standard);
+  animation: chat-in 0.18s var(--motion-easing-default);
 }
 
 @keyframes chat-in {
@@ -2949,12 +2956,12 @@ kbd {
 
 .suggestion svg {
   margin-left: auto;
-  color: var(--md-sys-color-primary);
+  color: var(--heroui-primary);
 }
 
 .suggestion:hover {
-  border-color: var(--md-sys-color-primary);
-  background: var(--md-sys-color-primary-container);
+  border-color: var(--heroui-primary);
+  background: var(--heroui-primary-container);
 }
 
 .chat-private {
@@ -2982,15 +2989,15 @@ kbd {
   border-radius: var(--radius-medium);
   font-size: 11.5px;
   line-height: 1.58;
-  background: var(--md-sys-color-surface-container-high);
+  background: var(--heroui-surface-container-high);
   color: var(--ink-soft);
   white-space: pre-wrap;
   word-break: break-word;
 }
 
 .chat-msg.user .chat-bubble {
-  background: var(--md-sys-color-primary);
-  color: var(--md-sys-color-on-primary);
+  background: var(--heroui-primary);
+  color: var(--heroui-on-primary);
   border-bottom-right-radius: var(--radius-extra-small);
 }
 
@@ -3005,17 +3012,16 @@ kbd {
   display: grid;
   place-items: center;
   border-radius: 50%;
-  background: var(--md-sys-color-primary-container);
-  color: var(--md-sys-color-primary);
-  border: 1px solid
-    color-mix(in srgb, var(--md-sys-color-primary) 30%, transparent);
+  background: var(--heroui-primary-container);
+  color: var(--heroui-primary);
+  border: 1px solid color-mix(in srgb, var(--heroui-primary) 30%, transparent);
   margin-top: 2px;
 }
 
 .chat-model-tag {
   margin-top: 6px;
   font-size: 8px;
-  color: var(--md-sys-color-on-surface-variant);
+  color: var(--ink-soft);
   word-break: break-word;
 }
 
@@ -3031,7 +3037,7 @@ kbd {
   width: 4px;
   height: 4px;
   border-radius: 50%;
-  background: var(--md-sys-color-primary);
+  background: var(--heroui-primary);
   animation: blink 1.2s infinite;
 }
 
@@ -3053,7 +3059,7 @@ kbd {
 .recipe-menu {
   margin: 0 12px 4px;
   border: 1px solid var(--line-strong);
-  border-radius: 10px;
+  border-radius: var(--radius-small);
   background: var(--surface);
   max-height: 230px;
   overflow-y: auto;
@@ -3079,12 +3085,12 @@ kbd {
   width: 100%;
   padding: 7px 10px;
   font-size: 10.5px;
-  color: var(--md-sys-color-on-surface);
+  color: var(--ink);
   border-bottom: 1px solid var(--line);
 }
 
 .recipe-item:hover {
-  background: var(--md-sys-color-primary-container);
+  background: var(--heroui-primary-container);
 }
 
 .recipe-item span {
@@ -3111,7 +3117,7 @@ kbd {
   flex: none;
   border-top: 1px solid var(--line);
   padding: 10px 12px 11px;
-  background: var(--md-sys-color-surface-container-low);
+  background: var(--heroui-surface-container-low);
 }
 
 .chat-compose textarea {
@@ -3121,7 +3127,7 @@ kbd {
   field-sizing: content;
   resize: none;
   border: 1px solid var(--line);
-  border-radius: 9px;
+  border-radius: var(--radius-small);
   background: var(--surface);
   padding: 8px 10px;
   font-size: 11.5px;
@@ -3159,12 +3165,12 @@ kbd {
   display: grid;
   place-items: center;
   border-radius: var(--radius-full);
-  background: var(--md-sys-color-primary);
-  color: var(--md-sys-color-on-primary);
+  background: var(--heroui-primary);
+  color: var(--heroui-on-primary);
 }
 
 .send-btn:hover {
-  background: color-mix(in srgb, var(--md-sys-color-primary) 86%, #000);
+  background: color-mix(in srgb, var(--heroui-primary) 86%, #000);
 }
 
 /* ------------------------------------------------------------------ modals */
@@ -3178,7 +3184,7 @@ kbd {
   padding: 24px;
   background: rgba(29, 26, 21, 0.44);
   backdrop-filter: blur(2px);
-  animation: fade-in 150ms var(--motion-easing-standard);
+  animation: fade-in 150ms var(--motion-easing-default);
 }
 
 .modal {
@@ -3188,11 +3194,11 @@ kbd {
   overflow-y: auto;
   padding: 20px 22px 18px;
   border-radius: var(--radius-large);
-  background: var(--md-sys-color-surface-container-high);
-  border: 1px solid var(--md-sys-color-outline);
+  background: var(--heroui-surface-container-high);
+  border: 1px solid var(--line);
   box-shadow: var(--shadow-elevation-3);
   transform-origin: center;
-  animation: modal-in 200ms var(--motion-easing-standard);
+  animation: modal-in 200ms var(--motion-easing-default);
 }
 
 .modal.wide {
@@ -3323,7 +3329,7 @@ kbd {
   gap: 10px;
   padding: 8px 10px;
   border-radius: var(--radius-small);
-  background: var(--md-sys-color-surface-container-low);
+  background: var(--heroui-surface-container-low);
   border: 1px solid var(--line);
 }
 
@@ -3372,7 +3378,7 @@ kbd {
 }
 
 .picker-row:hover {
-  background: var(--md-sys-color-surface-container-low);
+  background: var(--heroui-surface-container-low);
 }
 
 .picker-row input {
@@ -3393,16 +3399,16 @@ kbd {
   gap: 7px;
   padding: 9px 14px;
   border-radius: var(--radius-full);
-  background: var(--md-sys-color-on-surface);
-  color: var(--md-sys-color-primary-container);
+  background: var(--ink);
+  color: var(--heroui-primary-container);
   font-size: 10.5px;
   box-shadow: 0 12px 40px rgba(20, 18, 14, 0.3);
-  animation: toast-in 0.18s var(--motion-easing-standard);
+  animation: toast-in 0.18s var(--motion-easing-default);
   max-width: min(560px, 90vw);
 }
 
 .toast svg {
-  color: var(--md-sys-color-primary);
+  color: var(--heroui-primary);
   flex: none;
 }
 
@@ -3428,10 +3434,10 @@ kbd {
   width: min(560px, calc(100vw - 32px));
   padding: 12px 14px;
   border-radius: var(--radius-medium);
-  background: var(--md-sys-color-surface);
-  border: 1px solid var(--md-sys-color-outline);
+  background: var(--heroui-surface);
+  border: 1px solid var(--line);
   box-shadow: var(--shadow-elevation-3);
-  animation: banner-in 300ms var(--motion-easing-standard);
+  animation: banner-in 300ms var(--motion-easing-default);
 }
 
 @keyframes banner-in {
@@ -3590,10 +3596,10 @@ kbd {
   padding: 14px 16px;
   background: linear-gradient(
     120deg,
-    var(--md-sys-color-primary-container),
-    var(--md-sys-color-surface)
+    var(--heroui-primary-container),
+    var(--heroui-surface)
   );
-  border: 1px solid var(--md-sys-color-outline);
+  border: 1px solid var(--line);
   border-radius: var(--radius-medium);
 }
 
@@ -3604,8 +3610,8 @@ kbd {
   width: 34px;
   height: 34px;
   border-radius: var(--radius-small);
-  background: var(--md-sys-color-primary-container);
-  color: var(--md-sys-color-primary);
+  background: var(--heroui-primary-container);
+  color: var(--heroui-primary);
 }
 
 .coming-copy {
@@ -3663,8 +3669,8 @@ kbd {
   gap: 14px;
   margin-bottom: 8px;
   padding: 13px 16px;
-  background: var(--md-sys-color-surface);
-  border: 1px solid var(--md-sys-color-outline);
+  background: var(--heroui-surface);
+  border: 1px solid var(--line);
   border-radius: var(--radius-medium);
 }
 
@@ -3764,15 +3770,15 @@ kbd {
   right: 22px;
   bottom: 22px;
   z-index: 60;
-  animation: fade-in 250ms var(--motion-easing-standard);
+  animation: fade-in 250ms var(--motion-easing-default);
   display: flex;
   flex-direction: column;
   gap: 4px;
   width: 330px;
   padding: 14px 16px;
-  background: var(--md-sys-color-surface);
-  border: 1px solid var(--md-sys-color-outline);
-  border-left: 4px solid var(--md-sys-color-primary);
+  background: var(--heroui-surface);
+  border: 1px solid var(--line);
+  border-left: 4px solid var(--heroui-primary);
   border-radius: var(--radius-medium);
   box-shadow: var(--shadow-elevation-3);
 }
@@ -3785,7 +3791,7 @@ kbd {
   letter-spacing: 0.08em;
   font-size: 9.5px;
   font-weight: 700;
-  color: var(--md-sys-color-primary);
+  color: var(--heroui-primary);
 }
 
 .reminder-title {
