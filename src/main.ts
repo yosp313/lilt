@@ -639,8 +639,8 @@ async function tokenRequest(
 function consentPage(message: string): string {
   return `<!doctype html><html lang="en"><meta charset="utf-8">
 <title>Lilt calendar</title>
-<body style="font:16px 'Inter',ui-sans-serif,system-ui,sans-serif;padding:56px;background:#f4f4f5;color:#11181c">
-<h1 style="font-size:22px;font-weight:600;letter-spacing:-.01em">${escapeHtml(message)}</h1>
+<body style="font:16px system-ui,-apple-system,'Segoe UI',Roboto,'Helvetica Neue',Arial,sans-serif;padding:56px;background:#f4f4f5;color:#11181c">
+<h1 style="font-size:22px;font-weight:500;letter-spacing:-.01em">${escapeHtml(message)}</h1>
 <p style="color:rgba(17,24,28,.56)">You can close this tab and return to Lilt.</p>
 </body></html>`;
 }
@@ -967,14 +967,14 @@ function sharePage(shared: ReturnType<typeof sanitizeSharedNote>): string {
 <title>${escapeHtml(shared.title)} · ${escapeHtml(shared.workspaceName)}</title>
 <style>
 :root{--paper:#f4f4f5;--surface:#ffffff;--ink:#11181c;--muted:rgba(17,24,28,.56);--line:rgba(17,24,28,.14);--green:#b08968}
-*{box-sizing:border-box}body{margin:0;background:var(--paper);color:var(--ink);font:16px/1.6 'Inter',ui-sans-serif,system-ui,-apple-system,'Segoe UI',sans-serif}
+*{box-sizing:border-box}body{margin:0;background:var(--paper);color:var(--ink);font:16px/1.6 system-ui,-apple-system,'Segoe UI',Roboto,'Helvetica Neue',Arial,sans-serif}
 main{max-width:720px;margin:0 auto;padding:56px 28px 80px}
-.badge{display:inline-flex;align-items:center;gap:8px;font-size:12px;letter-spacing:.08em;text-transform:uppercase;color:var(--green);font-weight:600}
+.badge{display:inline-flex;align-items:center;gap:8px;font-size:12px;letter-spacing:0;color:var(--green);font-weight:500}
 .dot{width:7px;height:7px;border-radius:50%;background:var(--green)}
-h1{font-family:'Inter',ui-sans-serif,system-ui,sans-serif;font-weight:600;font-size:42px;line-height:1.12;letter-spacing:-.03em;margin:18px 0 10px}
+h1{font-family:'Iowan Old Style','Palatino Linotype',Palatino,'Book Antiqua',Georgia,'Noto Serif','Times New Roman',serif;font-weight:500;font-size:42px;line-height:1.12;letter-spacing:-.03em;margin:18px 0 10px}
 .meta{color:var(--muted);font-size:14px;margin-bottom:34px}
 .card{background:var(--surface);border:1px solid var(--line);border-radius:14px;padding:8px 30px 30px;box-shadow:0 4px 12px 0 rgba(0,0,0,.08)}
-h2{font-family:'Inter',ui-sans-serif,system-ui,sans-serif;font-weight:600;font-size:20px;margin:26px 0 8px;letter-spacing:-.01em}
+h2{font-family:'Iowan Old Style','Palatino Linotype',Palatino,'Book Antiqua',Georgia,'Noto Serif','Times New Roman',serif;font-weight:500;font-size:20px;margin:26px 0 8px;letter-spacing:-.01em}
 ul{margin:0;padding-left:20px}li{margin:7px 0;color:rgba(17,24,28,.72)}
 footer{margin-top:26px;padding-top:18px;border-top:1px solid var(--line);color:var(--muted);font-size:13px}
 .attendees{display:flex;flex-wrap:wrap;gap:6px;margin-top:10px}
@@ -1000,9 +1000,9 @@ function noticePage(title: string, message: string): string {
 <meta name="robots" content="noindex,nofollow">
 <title>${escapeHtml(title)}</title>
 <style>
-body{margin:0;background:#f4f4f5;color:#11181c;font:16px/1.6 'Inter',ui-sans-serif,system-ui,-apple-system,sans-serif;display:grid;place-items:center;min-height:100vh}
+body{margin:0;background:#f4f4f5;color:#11181c;font:16px/1.6 system-ui,-apple-system,'Segoe UI',Roboto,'Helvetica Neue',Arial,sans-serif;display:grid;place-items:center;min-height:100vh}
 main{max-width:420px;padding:36px;background:#ffffff;border:1px solid rgba(17,24,28,.14);border-radius:14px;margin:20px}
-h1{font-family:'Inter',ui-sans-serif,system-ui,sans-serif;font-size:28px;margin:0 0 8px;font-weight:600;letter-spacing:-.01em}
+h1{font-family:'Iowan Old Style','Palatino Linotype',Palatino,'Book Antiqua',Georgia,'Noto Serif','Times New Roman',serif;font-size:28px;margin:0 0 8px;font-weight:500;letter-spacing:-.01em}
 p{color:rgba(17,24,28,.56);font-size:14px}
 </style></head>
 <body><main>

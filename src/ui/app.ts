@@ -27,6 +27,7 @@ import {
   DIARIZATION_MODEL,
   dueReminder,
   encodeWav,
+  escapeHtml,
   enhancedText,
   folderDescendants,
   folderPath,
@@ -197,7 +198,6 @@ const CALENDAR_OFF: CalendarStatus = {
 let reminder: CalendarEvent | null = null;
 const remindedEvents = new Set<string>();
 
-const firstName = () => ui.db.user.name.split(' ')[0];
 const nowIso = () => new Date().toISOString();
 const uid = () => crypto.randomUUID();
 const noteById = (id: ID | undefined | null) =>
@@ -1281,20 +1281,17 @@ function calendarView(): Html {
       !status.connected
         ? html`<div class="blank-state">
             ${icon('calendar', 26)}
-            <h2>No calendar connected.</h2>
+            <h2>No calendar connected</h2>
             <p>
-              Settings → Calendar takes an OAuth client ID from your own Google
-              or Microsoft app. Tokens stay in your OS keychain; Lilt only reads
+              The connection asks for an OAuth client ID from your own Google or
+              Microsoft app. Tokens stay in your OS keychain; Lilt only reads
               the next two weeks.
             </p>
-            <button class="primary-btn" data-act="nav" data-view="settings">
-              Open settings
-            </button>
           </div>`
         : events.length === 0
           ? html`<div class="blank-state">
               ${icon('calendar', 26)}
-              <h2>Nothing on the calendar.</h2>
+              <h2>Nothing on the calendar</h2>
               <p>
                 No meetings in the next two weeks, or the account has no events
                 shared with this app.
@@ -1823,6 +1820,7 @@ function noteView(note: Note): Html {
         <input
           class="note-title"
           value="${note.title}"
+          dir="auto"
           data-input="title"
           data-id="${note.id}"
           aria-label="Note title"
@@ -1834,14 +1832,15 @@ function noteView(note: Note): Html {
           >
           ${note.durationMs > 0 ? html`<span class="dot-sep">·</span><span>${formatDuration(note.durationMs)}</span>` : ''}
           ${note.share.mode !== 'off' ? html`<span class="shared-chip">${icon('globe', 11)} Local preview</span>` : ''}
-          ${note.enhanced ? html`<span class="generated-chip">${icon('sparkle', 11)} ${templateById(note.enhanced.templateId)?.name ?? 'Enhanced'}</span>` : ''}
+          ${note.enhanced ? html`<span class="generated-chip">${icon('notes', 11)} ${templateById(note.enhanced.templateId)?.name ?? 'Enhanced'}</span>` : ''}
         </div>
         <input
           class="attendees-input"
           value="${note.attendees.join(', ')}"
           data-change="attendees"
           data-id="${note.id}"
-          placeholder="People in the meeting — filled from the transcript automatically"
+          dir="auto"
+          placeholder="People in the meeting"
           aria-label="Attendees"
         />
       </div>
@@ -1992,7 +1991,7 @@ function noteTabs(note: Note): Html {
           role="tab"
           aria-selected="${tab === 'enhanced'}"
         >
-          ${icon('sparkle', 13)} Enhanced
+          ${icon('notes', 13)} Enhanced
         </button>
         <button
           class="tab ${tab === 'raw' ? 'active' : ''}"
@@ -2010,7 +2009,7 @@ function noteTabs(note: Note): Html {
           role="tab"
           aria-selected="${tab === 'transcript'}"
         >
-          ${icon('notes', 13)} Transcript
+          ${icon('wave', 13)} Transcript
           <span class="inline-count" id="transcript-tab-count"
             >${note.transcript.length}</span
           >
@@ -2036,8 +2035,7 @@ function noteTabs(note: Note): Html {
           )}
         </select>
         <button class="enhance-btn" data-act="enhance" data-id="${note.id}">
-          ${icon('sparkle', 13)}
-          ${note.enhanced ? 'Regenerate' : 'Enhance notes'}
+          ${icon('pen', 13)} ${note.enhanced ? 'Regenerate' : 'Enhance notes'}
         </button>
       </div>
     </div>
@@ -2054,7 +2052,7 @@ function enhancedPanel(note: Note): Html {
   if (ui.generatingNoteId === note.id) {
     return html`<div class="enhanced loading">
       <div class="loading-head">
-        ${icon('sparkle', 16)} Reading the transcript and your notes…
+        ${icon('pen', 16)} Reading the transcript and your notes…
       </div>
       <div class="skeleton-line w80"></div>
       <div class="skeleton-line w60"></div>
@@ -2064,7 +2062,7 @@ function enhancedPanel(note: Note): Html {
   }
   if (!note.enhanced) {
     return html`<div class="empty-enhanced">
-      <div class="empty-icon">${icon('sparkle', 22)}</div>
+      <div class="empty-icon">${icon('pen', 22)}</div>
       <h2>Turn this into notes worth keeping.</h2>
       <p>
         Lilt combines what you typed with the transcript, then shows the source
@@ -2072,7 +2070,7 @@ function enhancedPanel(note: Note): Html {
         facts.
       </p>
       <button class="enhance-btn large" data-act="enhance" data-id="${note.id}">
-        ${icon('sparkle', 14)} Enhance notes
+        ${icon('pen', 14)} Enhance notes
       </button>
       <span class="small-note"
         >${ui.ai.configured ? `Using ${ui.ai.chatModel}` : 'No model key: builds an honest extract offline.'}</span
@@ -2174,10 +2172,6 @@ ${note.rawNotes}</textarea>
       <span id="raw-count"
         >${note.rawNotes.trim() ? `${note.rawNotes.trim().split(/\s+/).length} words · saved` : 'Raw notes stay private to you'}</span
       >
-      <button class="text-btn" data-act="enhance" data-id="${note.id}">
-        ${icon('sparkle', 12)}
-        ${note.enhanced ? 'Regenerate from these notes' : 'Enhance with transcript'}
-      </button>
     </div>
   </div>`;
 }
@@ -2215,6 +2209,16 @@ function transcriptPanel(note: Note): Html {
   </div>`;
 }
 
+/** One calm accent per speaker, so each voice in a transcript stands apart. */
+const SPEAKER_COLORS = [
+  '#8a6a49',
+  '#4f7a56',
+  '#a4702a',
+  '#5b6b8a',
+  '#a33d6f',
+  '#6b5b8a',
+];
+
 function transcriptList(note: Note, live: boolean): Html {
   const query = ui.transcriptQuery.trim().toLowerCase();
   const segments = query
@@ -2228,9 +2232,21 @@ function transcriptList(note: Note, live: boolean): Html {
       <p>No lines match “${ui.transcriptQuery}”.</p>
     </div>`;
   }
+  const colors = new Map<string, string>();
+  if (segments.some((segment) => segment.speaker === 'Me')) {
+    colors.set('Me', SPEAKER_COLORS[0]);
+  }
+  for (const segment of segments) {
+    const label = segment.speaker;
+    if (colors.has(label)) continue;
+    colors.set(label, SPEAKER_COLORS[colors.size % SPEAKER_COLORS.length]);
+  }
   return html`${segments.map(
     (segment) =>
-      html`<div class="seg ${segment.source === 'mic' ? 'me' : 'them'}">
+      html`<div
+        class="seg ${segment.source === 'mic' ? 'me' : 'them'}"
+        style="--seg-color: ${colors.get(segment.speaker) ?? SPEAKER_COLORS[0]}"
+      >
         <div class="seg-meta">
           <span class="seg-speaker">${segment.speaker}</span>
           <span>${formatClock(segment.startMs)}</span>
@@ -2664,7 +2680,7 @@ function listPane(): Html {
         title="${allSelected ? 'Clear selection' : 'Select all'}"
         aria-label="${allSelected ? 'Clear selection' : 'Select all'}"
       >
-        ${icon('check', 13)}
+        ${icon('check', 14)}
       </button>
     </header>
     ${ui.selected.size > 0 ? bulkBar() : ''}
@@ -2725,7 +2741,7 @@ function noteRow(note: Note): Html {
           data-id="${note.id}"
           title="Delete forever"
         >
-          ${icon('trash', 13)}
+          ${icon('trash', 14)}
         </button>
       </div>
     </article>`;
@@ -2764,7 +2780,7 @@ function noteRow(note: Note): Html {
         ${
           folder
             ? html`<span class="folder-tag"
-                >${icon('folder', 10)}${folder.name}</span
+                >${icon('folder', 12)}${folder.name}</span
               >`
             : ''
         }
@@ -2778,20 +2794,20 @@ function bulkBar(): Html {
     <strong>${ui.selected.size}</strong> selected
     <div class="bulk-actions">
       <button class="tiny-btn" data-act="bulk-move" title="Add to folder">
-        ${icon('folder', 13)}
+        ${icon('folder', 14)}
       </button>
       <button class="tiny-btn" data-act="bulk-export" title="Export CSV">
-        ${icon('download', 13)}
+        ${icon('download', 14)}
       </button>
       <button class="tiny-btn danger" data-act="bulk-delete" title="Delete">
-        ${icon('trash', 13)}
+        ${icon('trash', 14)}
       </button>
       <button
         class="tiny-btn"
         data-act="clear-selection"
         title="Clear selection"
       >
-        ${icon('x', 13)}
+        ${icon('x', 14)}
       </button>
     </div>
   </div>`;
@@ -2947,14 +2963,14 @@ function collectionCard(note: Note): Html {
   >
     <div class="card-top">
       <span class="card-date">${relativeDate(note.createdAt)}</span>
-      ${folder ? html`<span class="folder-tag">${icon('folder', 10)}${folder.name}</span>` : ''}
+      ${folder ? html`<span class="folder-tag">${icon('folder', 12)}${folder.name}</span>` : ''}
     </div>
     <h3>${note.title}</h3>
     <p>${noteSummary(note)}</p>
     <div class="card-foot">
       <span>${formatDuration(note.durationMs)}</span>
       ${note.attendees.length ? html`<span class="dot-sep">·</span><span>${note.attendees.length} people</span>` : ''}
-      <span class="card-arrow">${icon('arrowRight', 13)}</span>
+      <span class="card-arrow">${icon('arrowRight', 14)}</span>
     </div>
   </button>`;
 }
@@ -2979,19 +2995,16 @@ function homeView(): Html {
       ),
     ),
   );
-  const hour = new Date().getHours();
-  const greeting =
-    hour < 12 ? 'Good morning' : hour < 18 ? 'Good afternoon' : 'Good evening';
   const recent = notes.slice(0, 4);
   return html`<div class="page home">
     <header class="home-head">
       <div class="eyebrow">
         ${new Date().toLocaleDateString('en', { weekday: 'long', month: 'long', day: 'numeric' })}
       </div>
-      <h1>${greeting}, ${firstName()}.</h1>
+      <h1>Your meetings, remembered.</h1>
       <p class="lede">
-        Your meetings, remembered. No bot joins the call, and nothing records
-        until you start it.
+        No bot joins the call. Lilt hears your microphone and the meeting audio
+        on this device, and keeps the notes you write.
       </p>
       <div class="home-actions">
         <button class="primary-btn" data-act="new-note">
@@ -3030,30 +3043,20 @@ function homeView(): Html {
         : ''
     }
 
-    <div class="stat-grid">
-      <div class="stat-card">
-        <span class="stat-label">This week</span>
+    <section class="home-stats">
+      <div>
+        <span>Meetings this week</span>
         <strong>${thisWeek.length}</strong>
-        <span class="stat-sub"
-          >${thisWeek.length === 1 ? 'meeting' : 'meetings'} captured</span
-        >
       </div>
-      <div class="stat-card">
-        <span class="stat-label">Time remembered</span>
-        <strong>${minutes}<small>m</small></strong>
-        <span class="stat-sub">across your notes</span>
+      <div>
+        <span>Time transcribed</span>
+        <strong>${minutes}<small> min</small></strong>
       </div>
-      <div class="stat-card">
-        <span class="stat-label">People</span>
+      <div>
+        <span>People in your notes</span>
         <strong>${people.size}</strong>
-        <span class="stat-sub">in your meeting memory</span>
       </div>
-      <div class="stat-card accent">
-        <span class="stat-label">Folders</span>
-        <strong>${ui.db.folders.length}</strong>
-        <span class="stat-sub">nested as deep as you need</span>
-      </div>
-    </div>
+    </section>
 
     ${
       recent.length > 0
@@ -3083,7 +3086,7 @@ function homeView(): Html {
                       <span class="latest-date"
                         >${relativeDate(note.createdAt)}</span
                       >
-                      ${icon('arrowRight', 13)}
+                      ${icon('arrowRight', 14)}
                     </button>`,
                 )}
               </div>
@@ -3290,7 +3293,7 @@ function recipesView(): Html {
       )}
     </div>
     <div class="tip-card">
-      ${icon('sparkle', 16)}
+      ${icon('recipe', 16)}
       <p>
         <strong>Make one from a good question.</strong> If you asked something
         useful in chat, save it as a recipe with its scope and model so next
@@ -3488,7 +3491,7 @@ function settingsView(): Html {
       <h1>Settings</h1>
       <p class="lede">
         No account, no plans. Lilt stays useful without a model key, but a key
-        unlocks real note enhancement and chat.
+        adds real note enhancement and chat.
       </p>
     </header>
 
@@ -3863,7 +3866,7 @@ function settingsView(): Html {
                     class="ghost-btn danger-outline"
                     data-act="calendar-disconnect"
                   >
-                    ${icon('x', 13)} Disconnect
+                    ${icon('x', 14)} Disconnect
                   </button>
                 </div>
               </div>
@@ -3965,13 +3968,13 @@ function settingsView(): Html {
       </p>
       <div class="data-actions">
         <button class="ghost-btn" data-act="export-all">
-          ${icon('download', 13)} Export all notes as CSV
+          ${icon('download', 14)} Export all notes as CSV
         </button>
         <button class="ghost-btn danger-outline" data-act="reset-demo">
           ${icon('refresh', 13)} Reset to demo data
         </button>
         <button class="ghost-btn danger-outline" data-act="delete-all">
-          ${icon('trash', 13)} Delete all notes
+          ${icon('trash', 14)} Delete all notes
         </button>
       </div>
     </section>
@@ -4016,7 +4019,7 @@ function chatPane(): Html {
   return html`<aside class="chatpane" aria-label="Ask Lilt">
     <header class="chat-head">
       <div>
-        <div class="chat-title">${icon('sparkle', 14)} Ask Lilt</div>
+        <div class="chat-title">${icon('chat', 14)} Ask Lilt</div>
         <div class="scope-chip" title="Chat is scoped to where you opened it">
           ${scope.type === 'note' ? icon('notes', 11) : scope.type === 'folder' ? icon('folder', 11) : scope.type === 'person' ? icon('people', 11) : icon('notes', 11)}
           ${scope.label}
@@ -4064,7 +4067,7 @@ function chatPane(): Html {
       ${
         ui.chatBusy
           ? html`<div class="chat-msg assistant">
-              <div class="chat-avatar">${icon('sparkle', 12)}</div>
+              <div class="chat-avatar">${icon('chat', 12)}</div>
               <div class="chat-bubble typing">
                 <i></i><i></i><i></i><span>Reading your notes…</span>
               </div>
@@ -4122,6 +4125,17 @@ ${ui.chatDraft}</textarea>
   </aside>`;
 }
 
+// Models answer in light markdown; render bold and line breaks, escaped first.
+function chatBody(text: string): Html {
+  return raw(
+    escapeHtml(text)
+      .replace(/^#{1,6}\s+/gm, '')
+      .replace(/\*\*(.+?)\*\*/g, '<strong>$1</strong>')
+      .replace(/(^|\n)[-*]\s+/g, '$1• ')
+      .replace(/\n/g, '<br>'),
+  );
+}
+
 function chatMessage(message: ChatMessage): Html {
   if (message.role === 'user') {
     return html`<div class="chat-msg user">
@@ -4129,10 +4143,9 @@ function chatMessage(message: ChatMessage): Html {
     </div>`;
   }
   return html`<div class="chat-msg assistant">
-    <div class="chat-avatar">${icon('sparkle', 12)}</div>
+    <div class="chat-avatar">${icon('chat', 12)}</div>
     <div class="chat-bubble">
-      <div class="chat-text">${message.content}</div>
-      ${message.model ? html`<div class="chat-model-tag">${message.model}</div>` : ''}
+      <div class="chat-text" dir="auto">${chatBody(message.content)}</div>
     </div>
   </div>`;
 }
@@ -4236,7 +4249,7 @@ ${space?.description ?? ''}</textarea>
                     data-act="delete-space"
                     data-id="${space.id}"
                   >
-                    ${icon('trash', 13)} Delete
+                    ${icon('trash', 14)} Delete
                   </button>`
                 : ''
             }
@@ -4622,7 +4635,7 @@ ${space?.description ?? ''}</textarea>
 function toastView(): Html {
   if (!ui.toast) return html``;
   return html`<div class="toast" role="status">
-    ${icon('check', 13)}<span>${ui.toast}</span>
+    ${icon('check', 14)}<span>${ui.toast}</span>
   </div>`;
 }
 

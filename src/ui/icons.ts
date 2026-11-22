@@ -18,8 +18,6 @@ const BODIES: Record<string, string> = {
   stop: '<rect x="7" y="7" width="10" height="10" rx="2"/>',
   pause: '<path d="M9 6v12M15 6v12"/>',
   play: '<path d="M8 5l11 7-11 7z"/>',
-  sparkle:
-    '<path d="M12 3l1.7 5.3L19 10l-5.3 1.7L12 17l-1.7-5.3L5 10l5.3-1.7z"/><path d="M18.5 15.5l.8 2.2 2.2.8-2.2.8-.8 2.2-.8-2.2-2.2-.8 2.2-.8z"/>',
   share:
     '<circle cx="6" cy="12" r="2.5"/><circle cx="18" cy="6" r="2.5"/><circle cx="18" cy="18" r="2.5"/><path d="m8.3 10.8 7.4-3.6M8.3 13.2l7.4 3.6"/>',
   trash: '<path d="M4 7h16M9 7V4h6v3M6 7l1 14h10l1-14M10 11v6M14 11v6"/>',
