@@ -200,6 +200,7 @@ test('share links stay private when revoked, trashed or unknown', () => {
 
 test('settings saved by an older version pick up new defaults', () => {
   const merged = mergeSettings({ notifications: false, sttLanguage: 'de' });
+  assert.equal(merged.appearance, 'system');
   assert.equal(merged.notifications, false);
   assert.equal(merged.sttLanguage, 'de');
   assert.equal(merged.vadSensitivity, 0.5);
@@ -207,6 +208,13 @@ test('settings saved by an older version pick up new defaults', () => {
   assert.equal(merged.autoStartMeetingRecording, false);
   assert.equal(merged.diarizationEnabled, false);
   assert.deepEqual(mergeSettings(undefined), mergeSettings({}));
+});
+
+test('appearance keeps a saved choice and falls back for invalid values', () => {
+  assert.equal(mergeSettings({ appearance: 'dark' }).appearance, 'dark');
+  assert.equal(mergeSettings({ appearance: 'light' }).appearance, 'light');
+  assert.equal(mergeSettings({ appearance: 'system' }).appearance, 'system');
+  assert.equal(mergeSettings({ appearance: 'invalid' }).appearance, 'system');
 });
 
 test('only a calendar meeting in progress with a join link is active', () => {

@@ -164,6 +164,7 @@ export interface ChatThread {
 }
 
 export interface Settings {
+  appearance: 'system' | 'light' | 'dark';
   notifications: boolean;
   includeSystemAudio: boolean;
   sttLanguage: string;

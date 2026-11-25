@@ -38,6 +38,7 @@ import {
   localEnhance,
   matchSpeaker,
   mergeSegment,
+  mergeSettings,
   modelLabel,
   noteSummary,
   parseAttendees,
@@ -78,6 +79,11 @@ type View =
   | { name: 'trash' }
   | { name: 'settings' };
 
+type CollectionView = Extract<
+  View,
+  { name: 'notes' | 'space' | 'folder' | 'person' }
+>;
+
 type ConfirmAction =
   | 'delete-note'
   | 'delete-forever'
@@ -116,6 +122,7 @@ interface UI {
     syncing: boolean;
   };
   view: View;
+  noteCollection: CollectionView;
   query: string;
   selected: Set<ID>;
   lastCheckedId: ID | null;
@@ -470,6 +477,8 @@ function handleCaptureState(state: 'recording' | 'paused' | 'stopped'): void {
   note.status = state;
   touch(note);
   persist();
+  mount(document.getElementById('capture-shortcut'), captureShortcut());
+  renderList();
   renderMain();
 }
 
@@ -1257,10 +1266,7 @@ function calendarView(): Html {
     <header class="page-head">
       <div class="eyebrow">Next 14 days</div>
       <h1>Calendar</h1>
-      <p class="lede">
-        Read-only. Connect Google Calendar or Outlook once, and every meeting
-        can become a note without a bot joining.
-      </p>
+      <p class="lede">View upcoming meetings and open a note before joining.</p>
       ${
         status.connected
           ? html`<div class="page-actions">
@@ -1270,7 +1276,12 @@ function calendarView(): Html {
               </button>
             </div>`
           : html`<div class="page-actions">
-              <button class="primary-btn" data-act="nav" data-view="settings">
+              <button
+                class="primary-btn"
+                data-act="nav"
+                data-view="settings"
+                data-section="calendar"
+              >
                 ${icon('calendar', 13)} Connect a calendar
               </button>
             </div>`
@@ -1346,6 +1357,8 @@ function addNote(): void {
   };
   ui.db.notes.unshift(note);
   ui.selected.clear();
+  ui.noteCollection = collectionForView();
+  ui.query = '';
   ui.view = { name: 'note', noteId: note.id };
   ui.noteTab = 'raw';
   ui.focusTitle = true;
@@ -1785,17 +1798,6 @@ function noteView(note: Note): Html {
         }
       </div>
       <div class="note-actions">
-        ${
-          note.status === 'ended'
-            ? html`<button
-                class="ghost-btn small"
-                data-act="start-recording"
-                data-id="${note.id}"
-              >
-                ${icon('mic', 13)} Resume
-              </button>`
-            : ''
-        }
         <button
           class="ghost-btn small"
           data-act="share-open-modal"
@@ -1815,7 +1817,6 @@ function noteView(note: Note): Html {
       </div>
     </header>
     <div class="note-scroll">
-      ${live ? recorderBar(note) : startCard(note)}
       <div class="note-heading">
         <input
           class="note-title"
@@ -1824,6 +1825,7 @@ function noteView(note: Note): Html {
           data-input="title"
           data-id="${note.id}"
           aria-label="Note title"
+          title="${note.title}"
           spellcheck="false"
         />
         <div class="note-meta">
@@ -1834,16 +1836,20 @@ function noteView(note: Note): Html {
           ${note.share.mode !== 'off' ? html`<span class="shared-chip">${icon('globe', 11)} Local preview</span>` : ''}
           ${note.enhanced ? html`<span class="generated-chip">${icon('notes', 11)} ${templateById(note.enhanced.templateId)?.name ?? 'Enhanced'}</span>` : ''}
         </div>
-        <input
-          class="attendees-input"
-          value="${note.attendees.join(', ')}"
-          data-change="attendees"
-          data-id="${note.id}"
-          dir="auto"
-          placeholder="People in the meeting"
-          aria-label="Attendees"
-        />
+        <label class="note-people">
+          ${icon('people', 15)}
+          <input
+            class="attendees-input"
+            value="${note.attendees.join(', ')}"
+            data-change="attendees"
+            data-id="${note.id}"
+            dir="auto"
+            placeholder="Add attendees"
+            aria-label="Attendees"
+          />
+        </label>
       </div>
+      ${live ? recorderBar(note) : startCard(note)}
       ${live ? liveBody(note) : noteTabs(note)}
     </div>
   </div>`;
@@ -1851,12 +1857,15 @@ function noteView(note: Note): Html {
 
 function recorderBar(note: Note): Html {
   const paused = note.status === 'paused';
+  const starting = !capture.isRunning;
   return html`<div class="recorder-bar">
     <span class="rec-dot ${paused ? 'paused' : ''}"></span>
     <span class="rec-timer" id="rec-timer"
       >${formatClock(recordingBaseMs + capture.elapsedMs)}</span
     >
-    <span class="rec-state">${paused ? 'Paused' : 'Recording'}</span>
+    <span class="rec-state"
+      >${starting ? 'Starting…' : paused ? 'Paused' : 'Recording'}</span
+    >
     <div class="levels">
       <span class="level-label">Me</span>
       <span class="level-track"><i id="meter-me"></i></span>
@@ -1868,10 +1877,16 @@ function recorderBar(note: Note): Html {
       class="round-btn"
       data-act="${paused ? 'resume-recording' : 'pause-recording'}"
       title="${paused ? 'Resume' : 'Pause'}"
+      ${starting ? raw('disabled') : ''}
     >
       ${icon(paused ? 'play' : 'pause', 13)}
     </button>
-    <button class="stop-btn" data-act="stop-recording" data-id="${note.id}">
+    <button
+      class="stop-btn"
+      data-act="stop-recording"
+      data-id="${note.id}"
+      ${starting ? raw('disabled') : ''}
+    >
       ${icon('stop', 12)} Stop
     </button>
   </div>`;
@@ -1880,20 +1895,10 @@ function recorderBar(note: Note): Html {
 function startCard(note: Note): Html {
   const fresh = note.status === 'draft';
   return html`<div class="start-card ${fresh ? '' : 'compact'}">
+    <div class="start-icon">${icon('mic', 18)}</div>
     <div class="start-copy">
-      <div class="eyebrow">
-        ${fresh ? 'Manual start only' : 'Recording ended'}
-      </div>
-      <h2>
-        ${fresh ? 'Capture this meeting' : note.durationMs > 0 ? `${formatDuration(note.durationMs)} remembered` : 'Ready to continue'}
-      </h2>
-      <p>
-        ${
-          fresh
-            ? 'No bot joins the call. Lilt listens to your microphone and system audio, transcribes in short chunks, and discards the audio immediately.'
-            : 'Resume to add more audio, then regenerate the notes so the new part is included.'
-        }
-      </p>
+      <h2>${fresh ? 'Record this meeting' : 'Recording ended'}</h2>
+      ${fresh ? html`<p>Your microphone starts when you press record.</p>` : ''}
     </div>
     <div class="start-actions">
       <label class="switch-row">
@@ -1909,7 +1914,7 @@ function startCard(note: Note): Html {
         data-act="start-recording"
         data-id="${note.id}"
       >
-        ${icon('mic', 14)} ${fresh ? 'Start notes' : 'Resume recording'}
+        ${icon('mic', 14)} ${fresh ? 'Record' : 'Resume recording'}
       </button>
     </div>
   </div>`;
@@ -2063,17 +2068,16 @@ function enhancedPanel(note: Note): Html {
   if (!note.enhanced) {
     return html`<div class="empty-enhanced">
       <div class="empty-icon">${icon('pen', 22)}</div>
-      <h2>Turn this into notes worth keeping.</h2>
+      <h2>No summary yet</h2>
       <p>
-        Lilt combines what you typed with the transcript, then shows the source
-        behind every point. The template shapes the sections; it never invents
-        facts.
+        Create a summary from your raw notes and transcript using the selected
+        template.
       </p>
       <button class="enhance-btn large" data-act="enhance" data-id="${note.id}">
         ${icon('pen', 14)} Enhance notes
       </button>
       <span class="small-note"
-        >${ui.ai.configured ? `Using ${ui.ai.chatModel}` : 'No model key: builds an honest extract offline.'}</span
+        >${ui.ai.configured ? `Using ${ui.ai.chatModel}` : 'Offline summary'}</span
       >
     </div>`;
   }
@@ -2111,14 +2115,16 @@ function enhancedPanel(note: Note): Html {
 
 function enhancedSection(note: Note, section: Section): Html {
   return html`<section class="enh-section">
-    <h2
-      contenteditable="plaintext-only"
-      data-heading-id="${section.id}"
-      data-section-id="${section.id}"
-      data-note-id="${note.id}"
-      spellcheck="false"
-    >
-      ${section.heading}
+    <h2>
+      <span
+        contenteditable="plaintext-only"
+        data-heading-id="${section.id}"
+        data-section-id="${section.id}"
+        data-note-id="${note.id}"
+        spellcheck="false"
+        dir="auto"
+        >${section.heading}</span
+      >
     </h2>
     <ul>
       ${section.bullets.map(
@@ -2211,12 +2217,12 @@ function transcriptPanel(note: Note): Html {
 
 /** One calm accent per speaker, so each voice in a transcript stands apart. */
 const SPEAKER_COLORS = [
-  '#8a6a49',
-  '#4f7a56',
-  '#a4702a',
-  '#5b6b8a',
-  '#a33d6f',
-  '#6b5b8a',
+  'light-dark(#4c42ca, #bfb5ff)',
+  'light-dark(#117063, #8bdfc7)',
+  'light-dark(#92600c, #f2c47d)',
+  'light-dark(#1f5f98, #9acfff)',
+  'light-dark(#9a3a6d, #f6a5cf)',
+  'light-dark(#703db1, #d8b3ff)',
 ];
 
 function transcriptList(note: Note, live: boolean): Html {
@@ -2331,19 +2337,28 @@ const LIST_VIEWS = new Set([
 ]);
 
 function renderAll(): void {
+  document.documentElement.dataset.appearance = ui.db.settings.appearance;
+  const main = document.getElementById('main');
+  const keepSettingsScroll =
+    ui.view.name === 'settings' && main?.dataset.view === 'settings';
+  const scrollTop = keepSettingsScroll ? main.scrollTop : 0;
   mount(
     root,
     html`<div class="app ${ui.railClosed ? 'rail-closed' : ''}">
-        ${railView()}
-        ${
-          LIST_VIEWS.has(ui.view.name)
-            ? html`<section class="listpane" id="list-pane">
-                ${listPane()}
-              </section>`
-            : ''
-        }
-        <main class="main" id="main">${mainView()}</main>
-        <div id="chat-root">${ui.chatOpen ? chatPane() : ''}</div>
+        ${topBar()}
+        <div class="workspace">
+          ${railView()}
+          ${currentNote() ? html`<aside class="listpane" id="list-pane" aria-label="Browse notes">${listPane()}</aside>` : ''}
+          <main
+            class="main"
+            id="main"
+            tabindex="-1"
+            data-view="${ui.view.name}"
+          >
+            ${mainView()}
+          </main>
+          <div id="chat-root">${ui.chatOpen ? chatPane() : ''}</div>
+        </div>
       </div>
       <div id="modal-root">${modalView()}</div>
       <div id="reminder-root">${reminder ? reminderView() : ''}</div>
@@ -2352,12 +2367,13 @@ function renderAll(): void {
       </div>
       <div id="toast-root">${toastView()}</div>`,
   );
+  if (keepSettingsScroll)
+    document.getElementById('main')?.scrollTo(0, scrollTop);
   afterRender();
   ui.focusTitle = false;
   ui.focusChat = false;
 }
 
-// Toggled in place (no re-render) so the CSS transition can run.
 function toggleRail(): void {
   ui.railClosed = !ui.railClosed;
   document
@@ -2373,7 +2389,28 @@ function toggleRail(): void {
 }
 
 function renderList(): void {
-  mount(document.getElementById('list-pane'), listPane());
+  const pane = document.getElementById('list-pane');
+  if (!pane) return;
+  const focused = document.activeElement;
+  const previous =
+    focused instanceof HTMLElement && pane.contains(focused) ? focused : null;
+  const scrollTop = pane.querySelector('.note-list')?.scrollTop ?? 0;
+  mount(pane, listPane());
+  pane.querySelector('.note-list')?.scrollTo(0, scrollTop);
+  if (previous) {
+    const controls = pane.querySelectorAll<HTMLElement>(
+      '[data-act], [data-change]',
+    );
+    const next = Array.from(controls).find(
+      ({ dataset }) =>
+        dataset.act === previous.dataset.act &&
+        dataset.change === previous.dataset.change &&
+        dataset.id === previous.dataset.id,
+    );
+    (next ?? pane.querySelector<HTMLElement>('[data-act="select-all"]'))?.focus(
+      { preventScroll: true },
+    );
+  }
 }
 function renderListSoon(): void {
   if (listRenderTimer !== null) window.clearTimeout(listRenderTimer);
@@ -2398,6 +2435,13 @@ function renderChat(): void {
 
 function renderModal(): void {
   mount(document.getElementById('modal-root'), modalView());
+}
+
+function closeChat(): void {
+  ui.chatOpen = false;
+  ui.chatMenu = false;
+  renderAll();
+  document.querySelector<HTMLButtonElement>('.ask-trigger')?.focus();
 }
 
 function renderToast(): void {
@@ -2435,30 +2479,45 @@ function scrollTranscript(): void {
   if (log) log.scrollTop = log.scrollHeight;
 }
 
-function railView(): Html {
-  const visible = visibleNotes(ui.db);
-  const personal = ui.db.spaces.find((space) => space.kind === 'personal');
-  const team = ui.db.spaces.find((space) => space.kind === 'team');
-  const custom = ui.db.spaces.filter(
-    (space) => space.kind !== 'personal' && space.kind !== 'team',
-  );
-  return html`<aside class="rail">
+const shortcutKey = /Mac/.test(navigator.platform) ? '⌘' : 'Ctrl+';
+
+function captureShortcut(): Html {
+  const note = noteById(recordingNoteId);
+  if (!note || (note.status !== 'recording' && note.status !== 'paused'))
+    return html``;
+  const paused = note.status === 'paused';
+  return html`<button
+    class="capture-shortcut ${paused ? 'paused' : ''}"
+    data-act="open-note"
+    data-id="${note.id}"
+    title="Open recording"
+  >
+    <span class="rec-dot ${paused ? 'paused' : ''}"></span>
+    ${!capture.isRunning ? 'Starting recording' : paused ? 'Recording paused' : 'Recording'}
+  </button>`;
+}
+
+function topBar(): Html {
+  return html`<header class="topbar">
     <button
-      class="rail-toggle"
+      class="rail-toggle tiny-btn"
       data-act="toggle-rail"
       aria-label="${ui.railClosed ? 'Expand sidebar' : 'Collapse sidebar'}"
       aria-expanded="${String(!ui.railClosed)}"
+      aria-controls="sidebar"
     >
-      ${icon('panel', 15)}
+      ${icon('panel', 18)}
     </button>
-    <button class="brand" data-act="nav" data-view="home">
-      ${brandMark()} <span>Lilt</span>
+    <button
+      class="brand"
+      data-act="nav"
+      data-view="home"
+      aria-label="Lilt home"
+    >
+      ${brandMark(30)} <span>Lilt</span>
     </button>
-    <button class="new-note-btn" data-act="new-note" title="New note">
-      ${icon('plus', 15)} <span>New note</span> <kbd>⌘N</kbd>
-    </button>
-    <label class="rail-search">
-      ${icon('search', 14)}
+    <label class="top-search">
+      ${icon('search', 17)}
       <input
         type="search"
         placeholder="Search notes"
@@ -2466,39 +2525,73 @@ function railView(): Html {
         data-input="search"
         aria-label="Search notes"
       />
+      <kbd aria-hidden="true">${shortcutKey}K</kbd>
     </label>
-    <nav class="rail-nav" aria-label="Main">
-      ${navButton('home', 'Home', 'home')}
-      ${navButton('calendar', 'Calendar', 'calendar')}
-      ${navButton('notes', 'All notes', 'notes', visible.length)}
-      ${navButton('people', 'People', 'people')}
-      ${navButton('recipes', 'Recipes', 'recipe')}
-      ${navButton('trash', 'Trash', 'trash', ui.db.notes.filter((note) => note.deletedAt).length || undefined)}
-    </nav>
-    <div class="rail-scroll">
-      ${personal ? spaceBlock(personal) : ''} ${team ? spaceBlock(team) : ''}
-      ${custom.map((space) => spaceBlock(space))}
-      <button class="rail-link rail-add" data-act="new-space" title="New space">
-        ${icon('plus', 12)} <span>New space</span>
+    <div class="top-actions">
+      <div id="capture-shortcut" aria-live="polite">${captureShortcut()}</div>
+      <button
+        class="ghost-btn ask-trigger"
+        data-act="open-chat"
+        title="Ask Lilt"
+        aria-label="Ask Lilt"
+        aria-expanded="${ui.chatOpen}"
+        aria-controls="chat-root"
+      >
+        ${icon('chat', 16)} <span>Ask Lilt</span>
+      </button>
+      <button
+        class="primary-btn"
+        data-act="new-note"
+        title="New note (${shortcutKey}N)"
+      >
+        ${icon('plus', 17)} New note
       </button>
     </div>
-    <div class="rail-foot">
-      <div class="plan-chip">
-        <span class="plan-dot"></span>
-        On this device · no account
+  </header>`;
+}
+
+function railView(): Html {
+  const visible = visibleNotes(ui.db);
+  const personal = ui.db.spaces.find((space) => space.kind === 'personal');
+  const team = ui.db.spaces.find((space) => space.kind === 'team');
+  const custom = ui.db.spaces.filter(
+    (space) => space.kind !== 'personal' && space.kind !== 'team',
+  );
+  return html`<aside
+    class="rail"
+    id="sidebar"
+    aria-label="Workspace navigation"
+  >
+    <nav class="rail-nav" aria-label="Main">
+      ${navButton('home', 'Meeting desk', 'home')}
+      ${navButton('notes', 'All notes', 'notes', visible.length)}
+      ${navButton('calendar', 'Calendar', 'calendar')}
+      ${navButton('people', 'People', 'people')}
+      ${navButton('recipes', 'Recipes', 'recipe')}
+    </nav>
+    <div class="rail-scroll">
+      <div class="spaces-head">
+        <h2>Spaces</h2>
+        <button
+          class="tiny-btn"
+          data-act="new-space"
+          title="New space"
+          aria-label="New space"
+        >
+          ${icon('plus', 14)}
+        </button>
       </div>
-      <button
-        class="rail-link"
-        data-act="nav"
-        data-view="settings"
-        title="Settings"
-      >
-        ${icon('settings', 15)} <span>Settings</span>
-      </button>
+      ${personal ? spaceBlock(personal) : ''} ${team ? spaceBlock(team) : ''}
+      ${custom.map((space) => spaceBlock(space))}
+    </div>
+    <div class="rail-foot">
+      ${navButton('trash', 'Trash', 'trash', ui.db.notes.filter((note) => note.deletedAt).length || undefined)}
+      ${navButton('settings', 'Settings', 'settings')}
       <div class="user-row">
-        ${avatar(ui.db.user.name, 26)}
+        ${avatar(ui.db.user.name, 30)}
         <div class="user-copy">
           <strong>${ui.db.user.name}</strong>
+          <span>On this device</span>
         </div>
       </div>
     </div>
@@ -2513,13 +2606,18 @@ function navButton(
 ): Html {
   const active =
     ui.view.name === view ||
-    (view === 'notes' && ui.view.name === 'note') ||
-    (view === 'people' && ui.view.name === 'person');
+    (view === 'notes' &&
+      ui.view.name === 'note' &&
+      ui.noteCollection.name === 'notes') ||
+    (view === 'people' &&
+      (ui.view.name === 'person' ||
+        (ui.view.name === 'note' && ui.noteCollection.name === 'person')));
   return html`<button
     class="rail-nav-item ${active ? 'active' : ''}"
     data-act="nav"
     data-view="${view}"
     title="${label}"
+    aria-current="${active ? 'page' : 'false'}"
   >
     ${icon(iconName, 15)} <span>${label}</span>
     ${count ? html`<span class="nav-count">${count}</span>` : ''}
@@ -2530,7 +2628,8 @@ function spaceBlock(space: Space): Html {
   const folders = ui.db.folders.filter(
     (folder) => folder.spaceId === space.id && !folder.parentId,
   );
-  const activeSpace = ui.view.name === 'space' && ui.view.spaceId === space.id;
+  const view = ui.view.name === 'note' ? ui.noteCollection : ui.view;
+  const activeSpace = view.name === 'space' && view.spaceId === space.id;
   return html`<div class="space-block">
     <div class="space-head">
       <button
@@ -2577,7 +2676,8 @@ function folderBranch(
   const children = ui.db.folders.filter(
     (child) => child.parentId === folder.id,
   );
-  const active = ui.view.name === 'folder' && ui.view.folderId === folder.id;
+  const view = ui.view.name === 'note' ? ui.noteCollection : ui.view;
+  const active = view.name === 'folder' && view.folderId === folder.id;
   const nested = folderDescendants(ui.db.folders, folder.id);
   const noteCount = visibleNotes(ui.db).filter((note) =>
     note.folderIds.some((id) => nested.has(id)),
@@ -2642,8 +2742,16 @@ function avatar(name: string, size = 32): Html {
 // List pane
 // ---------------------------------------------------------------------------
 
-function listNotes(): Note[] {
+function collectionForView(): CollectionView {
   const view = ui.view;
+  if (view.name === 'note') return ui.noteCollection;
+  if (view.name === 'space' || view.name === 'folder' || view.name === 'person')
+    return view;
+  return { name: 'notes' };
+}
+
+function listNotes(): Note[] {
+  const view = ui.view.name === 'trash' ? ui.view : collectionForView();
   let notes =
     view.name === 'trash'
       ? ui.db.notes.filter((note) => note.deletedAt)
@@ -2667,27 +2775,29 @@ function listNotes(): Note[] {
 function listPane(): Html {
   const notes = listNotes();
   const meta = collectionMeta();
+  const compact = Boolean(currentNote());
   const allSelected =
     notes.length > 0 && notes.every((note) => ui.selected.has(note.id));
   return html`<header class="list-head">
       <div class="list-title">
-        <h2>${meta.listTitle}</h2>
-        <span class="list-count">${notes.length}</span>
+        ${compact ? html`<button class="list-back" data-act="back-to-notes" title="Back to ${meta.title}">${icon('arrowLeft', 14)} <span>${meta.title}</span></button>` : html`<span>${notes.length} ${notes.length === 1 ? 'note' : 'notes'}</span>`}
       </div>
       <button
-        class="tiny-btn ${allSelected ? 'on' : ''}"
+        class="${compact ? 'tiny-btn' : 'ghost-btn small'} ${allSelected ? 'on' : ''}"
         data-act="select-all"
+        aria-pressed="${allSelected}"
         title="${allSelected ? 'Clear selection' : 'Select all'}"
         aria-label="${allSelected ? 'Clear selection' : 'Select all'}"
       >
         ${icon('check', 14)}
+        ${compact ? '' : allSelected ? 'Clear selection' : 'Select all'}
       </button>
     </header>
     ${ui.selected.size > 0 ? bulkBar() : ''}
     ${
       ui.query.trim()
         ? html`<div class="list-filter">
-            ${icon('search', 12)} Results for “${ui.query}”
+            ${icon('search', 12)} <span>Results for “${ui.query}”</span>
             <button class="link-btn" data-act="clear-search">Clear</button>
           </div>`
         : ''
@@ -2748,28 +2858,34 @@ function noteRow(note: Note): Html {
   }
   return html`<article
     class="note-row ${active ? 'active' : ''} ${checked ? 'checked' : ''}"
-    data-act="open-note"
-    data-id="${note.id}"
   >
     <label class="row-check" title="Select note">
       <input
         type="checkbox"
         data-change="check"
         data-id="${note.id}"
+        aria-label="Select ${note.title}"
         ${checked ? raw('checked') : ''}
       />
     </label>
-    <div class="row-main">
-      <div class="row-top">
-        <div class="row-title">${note.title}</div>
-        ${
-          note.status === 'recording'
-            ? html` <span class="rec-mini">Recording</span> `
-            : ''
-        }
-      </div>
-      <div class="row-snippet">${noteSummary(note)}</div>
-      <div class="row-meta">
+    <button
+      class="row-main row-open"
+      data-act="open-note"
+      data-id="${note.id}"
+      aria-current="${active ? 'page' : 'false'}"
+    >
+      <span class="row-copy">
+        <span class="row-top">
+          <span class="row-title">${note.title}</span>
+          ${
+            note.status === 'recording'
+              ? html` <span class="rec-mini">Recording</span> `
+              : ''
+          }
+        </span>
+        <span class="row-snippet">${noteSummary(note)}</span>
+      </span>
+      <span class="row-meta">
         <span>${relativeDate(note.createdAt)}</span>
         ${
           note.durationMs > 0
@@ -2779,13 +2895,13 @@ function noteRow(note: Note): Html {
         }
         ${
           folder
-            ? html`<span class="folder-tag"
-                >${icon('folder', 12)}${folder.name}</span
+            ? html`<span class="folder-tag" title="${folder.name}"
+                >${icon('folder', 12)}<span>${folder.name}</span></span
               >`
             : ''
         }
-      </div>
-    </div>
+      </span>
+    </button>
   </article>`;
 }
 
@@ -2834,70 +2950,58 @@ function mainView(): Html {
 }
 
 interface CollectionMeta {
-  listTitle: string;
   eyebrow: string;
   title: string;
   description: string;
-  scope: Scope;
   spaceId: ID | null;
   folderId: ID | null;
 }
 
 function collectionMeta(): CollectionMeta {
-  if (ui.view.name === 'space') {
-    const space = spaceById(ui.view.spaceId);
+  const view = ui.view.name === 'trash' ? ui.view : collectionForView();
+  if (view.name === 'space') {
+    const space = spaceById(view.spaceId);
     return {
-      listTitle: space?.name ?? 'Space',
       eyebrow: space?.kind === 'personal' ? 'Private space' : 'Space',
       title: space?.name ?? 'Space',
       description: space?.description ?? '',
-      scope: scopeForView(),
       spaceId: space?.id ?? null,
       folderId: null,
     };
   }
-  if (ui.view.name === 'folder') {
-    const folder = folderById(ui.view.folderId);
+  if (view.name === 'folder') {
+    const folder = folderById(view.folderId);
     const space = folder ? spaceById(folder.spaceId) : null;
     return {
-      listTitle: folder?.name ?? 'Folder',
-      eyebrow: `${space?.name ?? 'Space'} / ${folder ? folderPath(ui.db.folders, folder.id) : ''}`,
+      eyebrow: space?.name ?? 'Folder',
       title: folder?.name ?? 'Folder',
       description: folder?.description ?? '',
-      scope: scopeForView(),
       spaceId: folder?.spaceId ?? null,
       folderId: folder?.id ?? null,
     };
   }
-  if (ui.view.name === 'person') {
+  if (view.name === 'person') {
     return {
-      listTitle: ui.view.person,
       eyebrow: 'Person',
-      title: ui.view.person,
-      description:
-        'Every note where this person was an attendee. Chat is scoped to them.',
-      scope: scopeForView(),
+      title: view.person,
+      description: '',
       spaceId: null,
       folderId: null,
     };
   }
-  if (ui.view.name === 'trash') {
+  if (view.name === 'trash') {
     return {
-      listTitle: 'Trash',
       eyebrow: 'Trash',
       title: 'Trash',
       description: '',
-      scope: scopeForView(),
       spaceId: null,
       folderId: null,
     };
   }
   return {
-    listTitle: 'All notes',
-    eyebrow: 'Library',
+    eyebrow: '',
     title: 'All notes',
-    description: 'Every meeting you can see, newest first.',
-    scope: scopeForView(),
+    description: '',
     spaceId: null,
     folderId: null,
   };
@@ -2905,16 +3009,14 @@ function collectionMeta(): CollectionMeta {
 
 function collectionOverview(): Html {
   const meta = collectionMeta();
-  const notes = listNotes();
-  return html`<div class="page">
-    <header class="page-head">
-      <div class="eyebrow">${meta.eyebrow}</div>
-      <h1>${meta.title}</h1>
-      <p class="lede">${meta.description}</p>
+  return html`<div class="page collection-page">
+    <header class="page-head page-head-actions">
+      <div>
+        ${meta.eyebrow ? html`<div class="eyebrow">${meta.eyebrow}</div>` : ''}
+        <h1>${meta.title}</h1>
+        ${meta.description ? html`<p class="lede">${meta.description}</p>` : ''}
+      </div>
       <div class="page-actions">
-        <button class="primary-btn" data-act="new-note">
-          ${icon('plus', 14)} New note
-        </button>
         ${
           meta.folderId
             ? html`<button
@@ -2923,56 +3025,20 @@ function collectionOverview(): Html {
                 data-space="${meta.spaceId}"
                 data-parent="${meta.folderId}"
               >
-                ${icon('folder', 14)} New subfolder
+                ${icon('folder', 15)} New subfolder
               </button>`
             : ''
         }
         <button class="ghost-btn" data-act="open-chat">
-          ${icon('chat', 14)} Ask
-          ${ui.view.name === 'folder' ? 'this folder' : ui.view.name === 'person' ? 'about them' : 'across notes'}
+          ${icon('chat', 15)} Ask
+          ${ui.view.name === 'folder' ? 'this folder' : ui.view.name === 'space' ? 'this space' : 'across notes'}
         </button>
       </div>
     </header>
-    ${
-      notes.length === 0
-        ? html`<div class="blank-state">
-            ${icon('mic', 26)}
-            <h2>
-              ${ui.query.trim() ? 'Nothing matches that.' : 'A quiet room, ready when you are.'}
-            </h2>
-            <p>
-              ${ui.query.trim() ? 'Try a different person, phrase, or date.' : 'Open a new note before the call. Nothing records until you press start.'}
-            </p>
-            <button class="primary-btn" data-act="new-note">
-              ${icon('plus', 14)} Start a note
-            </button>
-          </div>`
-        : html`<div class="collection-grid">
-            ${notes.slice(0, 8).map((note) => collectionCard(note))}
-          </div>`
-    }
+    <section class="collection-list" id="list-pane" aria-label="Notes">
+      ${listPane()}
+    </section>
   </div>`;
-}
-
-function collectionCard(note: Note): Html {
-  const folder = note.folderIds[0] ? folderById(note.folderIds[0]) : null;
-  return html`<button
-    class="note-card"
-    data-act="open-note"
-    data-id="${note.id}"
-  >
-    <div class="card-top">
-      <span class="card-date">${relativeDate(note.createdAt)}</span>
-      ${folder ? html`<span class="folder-tag">${icon('folder', 12)}${folder.name}</span>` : ''}
-    </div>
-    <h3>${note.title}</h3>
-    <p>${noteSummary(note)}</p>
-    <div class="card-foot">
-      <span>${formatDuration(note.durationMs)}</span>
-      ${note.attendees.length ? html`<span class="dot-sep">·</span><span>${note.attendees.length} people</span>` : ''}
-      <span class="card-arrow">${icon('arrowRight', 14)}</span>
-    </div>
-  </button>`;
 }
 
 function homeView(): Html {
@@ -2995,129 +3061,157 @@ function homeView(): Html {
       ),
     ),
   );
-  const recent = notes.slice(0, 4);
+  const recent = notes.slice(0, 5);
   return html`<div class="page home">
-    <header class="home-head">
+    <header class="page-head home-head">
       <div class="eyebrow">
         ${new Date().toLocaleDateString('en', { weekday: 'long', month: 'long', day: 'numeric' })}
       </div>
-      <h1>Your meetings, remembered.</h1>
-      <p class="lede">
-        No bot joins the call. Lilt hears your microphone and the meeting audio
-        on this device, and keeps the notes you write.
-      </p>
-      <div class="home-actions">
-        <button class="primary-btn" data-act="new-note">
-          ${icon('plus', 14)} Start a note
-        </button>
-        <button class="ghost-btn" data-act="open-chat">
-          ${icon('chat', 14)} Ask across meetings
-        </button>
-      </div>
+      <h1>Meeting desk</h1>
     </header>
 
-    ${
-      next
-        ? html`<section class="coming-card">
-            <div class="coming-icon">${icon('calendar', 16)}</div>
-            <div class="coming-copy">
-              <span class="coming-when"
-                >${startsInLabel(next)} · ${eventTime(next)}</span
-              >
-              <strong>${next.title}</strong>
-              <span
-                >${next.attendees.length ? next.attendees.slice(0, 3).join(', ') : 'No attendees'}${next.attendees.length > 3 ? ` +${next.attendees.length - 3}` : ''}</span
-              >
-            </div>
-            <div class="coming-actions">
-              <button
-                class="primary-btn small"
-                data-act="start-event"
-                data-key="${calendarEventKey(next)}"
-              >
-                ${icon('mic', 12)} Take notes
-              </button>
-              ${next.meetingUrl ? html`<button class="ghost-btn small" data-act="join-link" data-key="${calendarEventKey(next)}">${icon('external', 12)} Join</button>` : ''}
-            </div>
-          </section>`
-        : ''
-    }
+    <div class="home-grid">
+      <div class="home-primary">
+        <section class="capture-card">
+          <div class="capture-symbol">${icon('wave', 22)}</div>
+          <h2>Capture a meeting</h2>
+          <p>
+            Open a note to write, record, and transcribe your meeting without a
+            bot joining the call.
+          </p>
+          <button class="primary-btn" data-act="new-note">
+            ${icon('plus', 16)} Start a note
+          </button>
+        </section>
 
-    <section class="home-stats">
-      <div>
-        <span>Meetings this week</span>
-        <strong>${thisWeek.length}</strong>
-      </div>
-      <div>
-        <span>Time transcribed</span>
-        <strong>${minutes}<small> min</small></strong>
-      </div>
-      <div>
-        <span>People in your notes</span>
-        <strong>${people.size}</strong>
-      </div>
-    </section>
-
-    ${
-      recent.length > 0
-        ? html`<section class="home-section">
-              <div class="section-head">
-                <h2>Continue</h2>
-                <button class="text-btn" data-act="nav" data-view="notes">
-                  All notes ${icon('arrowRight', 12)}
-                </button>
-              </div>
-              <div class="continue-grid">
-                ${recent.slice(0, 2).map((note) => collectionCard(note))}
-              </div>
-            </section>
-            <section class="home-section">
-              <div class="section-head"><h2>Latest notes</h2></div>
-              <div class="latest-list">
-                ${recent.map(
-                  (note) =>
-                    html`<button
-                      class="latest-row"
-                      data-act="open-note"
-                      data-id="${note.id}"
-                    >
-                      <span class="latest-title">${note.title}</span>
-                      <span class="latest-snippet">${noteSummary(note)}</span>
-                      <span class="latest-date"
-                        >${relativeDate(note.createdAt)}</span
-                      >
-                      ${icon('arrowRight', 14)}
-                    </button>`,
-                )}
-              </div>
-            </section>`
-        : html`<div class="blank-state home-blank">
-            ${icon('wave', 26)}
-            <h2>Your first note is the only hard one.</h2>
-            <p>
-              Open a note, press start, and type whatever you hear. Lilt turns
-              the rough notes and transcript into something you can keep.
-            </p>
-            <button class="primary-btn" data-act="new-note">
-              ${icon('plus', 14)} Start a note
+        <section class="home-section">
+          <div class="section-head">
+            <h2>Recent notes</h2>
+            <button class="text-btn" data-act="nav" data-view="notes">
+              All notes ${icon('arrowRight', 14)}
             </button>
-          </div>`
-    }
-
-    <section class="privacy-card">
-      <div class="privacy-icon">${icon('lock', 18)}</div>
-      <div>
-        <h3>Private until you share it.</h3>
-        <p>
-          Audio is transcribed in chunks and discarded. Only the transcript,
-          your notes and the enhanced summary are saved. Shared links never
-          expose the transcript.
-        </p>
+          </div>
+          ${
+            recent.length
+              ? html`<div class="latest-list">
+                  ${recent.map(
+                    (note) =>
+                      html`<button
+                        class="latest-row"
+                        data-act="open-note"
+                        data-id="${note.id}"
+                      >
+                        <span class="latest-icon">${icon('notes', 17)}</span>
+                        <span class="latest-copy">
+                          <span class="latest-title">${note.title}</span>
+                          <span class="latest-snippet"
+                            >${noteSummary(note)}</span
+                          >
+                        </span>
+                        <span class="latest-date"
+                          >${relativeDate(note.createdAt)}</span
+                        >
+                        ${icon('arrowRight', 15)}
+                      </button>`,
+                  )}
+                </div>`
+              : html`<div class="blank-state home-blank">
+                  ${icon('notes', 24)}
+                  <h2>No notes yet</h2>
+                  <p>Start a note to capture your first meeting.</p>
+                </div>`
+          }
+        </section>
       </div>
-      <button class="text-btn" data-act="nav" data-view="settings">
-        Data controls ${icon('arrowRight', 12)}
-      </button>
-    </section>
+
+      <div class="home-secondary">
+        <section class="home-box">
+          <div class="section-head">
+            <h2>Up next</h2>
+            ${icon('calendar', 17)}
+          </div>
+          ${
+            next
+              ? html`<div class="coming-copy">
+                    <span class="coming-when"
+                      >${startsInLabel(next)} · ${eventTime(next)}</span
+                    >
+                    <strong>${next.title}</strong>
+                    <span
+                      >${next.attendees.length ? next.attendees.slice(0, 3).join(', ') : 'No attendees'}${next.attendees.length > 3 ? ` +${next.attendees.length - 3}` : ''}</span
+                    >
+                  </div>
+                  <div class="coming-actions">
+                    <button
+                      class="primary-btn small"
+                      data-act="start-event"
+                      data-key="${calendarEventKey(next)}"
+                    >
+                      ${icon('mic', 13)} Take notes
+                    </button>
+                    ${next.meetingUrl ? html`<button class="ghost-btn small" data-act="join-link" data-key="${calendarEventKey(next)}">${icon('external', 13)} Join</button>` : ''}
+                  </div>`
+              : ui.calendar.status.connected
+                ? html`<p>No upcoming meetings.</p>
+                    <button
+                      class="text-btn"
+                      data-act="nav"
+                      data-view="calendar"
+                    >
+                      Open calendar ${icon('arrowRight', 14)}
+                    </button>`
+                : html`<p>
+                      Connect Google Calendar or Outlook to see your upcoming
+                      meetings.
+                    </p>
+                    <button
+                      class="text-btn"
+                      data-act="nav"
+                      data-view="settings"
+                      data-section="calendar"
+                    >
+                      Connect calendar ${icon('arrowRight', 14)}
+                    </button>`
+          }
+        </section>
+
+        <section class="home-box">
+          <div class="section-head">
+            <h2>Note activity</h2>
+            ${icon('clock', 17)}
+          </div>
+          <dl class="home-stats">
+            <div>
+              <dt>Meetings in the last 7 days</dt>
+              <dd>${thisWeek.length}</dd>
+            </div>
+            <div>
+              <dt>Recorded in the last 7 days</dt>
+              <dd>${minutes} min</dd>
+            </div>
+            <div>
+              <dt>People in your notes</dt>
+              <dd>${people.size}</dd>
+            </div>
+          </dl>
+        </section>
+
+        <section class="home-box data-box">
+          ${icon('lock', 18)}
+          <div>
+            <h2>Notes stay on this device</h2>
+            <button
+              class="text-btn"
+              data-act="nav"
+              data-view="settings"
+              data-section="data"
+            >
+              Data controls ${icon('arrowRight', 14)}
+            </button>
+          </div>
+        </section>
+      </div>
+    </div>
   </div>`;
 }
 
@@ -3149,12 +3243,8 @@ function peopleView(): Html {
   const people = peopleList();
   return html`<div class="page">
     <header class="page-head">
-      <div class="eyebrow">Directory</div>
       <h1>People</h1>
-      <p class="lede">
-        Built quietly from the attendees on your notes. No manual contact list,
-        no enrichment you did not ask for.
-      </p>
+      <p class="lede">Find meeting notes by attendee.</p>
     </header>
     ${
       people.length === 0
@@ -3191,56 +3281,41 @@ function peopleView(): Html {
 }
 
 function personView(person: string): Html {
-  const notes = listNotes();
-  return html`<div class="page">
-    <header class="page-head with-avatar">
-      ${avatar(person, 54)}
-      <div>
-        <div class="eyebrow">Person</div>
-        <h1>${person}</h1>
-        <p class="lede">
-          ${notes.length}
-          ${notes.length === 1 ? 'conversation' : 'conversations'} in your
-          notes. Ask Lilt what you committed to, or what is still open.
-        </p>
-        <div class="page-actions">
-          <button class="primary-btn" data-act="open-chat">
-            ${icon('chat', 14)} Ask about ${person.split(' ')[0]}
+  return html`<div class="page collection-page">
+    <header class="page-head page-head-actions">
+      <div class="person-heading">
+        ${avatar(person, 54)}
+        <div>
+          <button class="text-btn" data-act="nav" data-view="people">
+            ${icon('arrowLeft', 14)} All people
           </button>
-          <button class="ghost-btn" data-act="nav" data-view="people">
-            All people
-          </button>
+          <h1>${person}</h1>
         </div>
       </div>
+      <div class="page-actions">
+        <button class="ghost-btn" data-act="open-chat">
+          ${icon('chat', 15)} Ask about this person
+        </button>
+      </div>
     </header>
-    ${
-      notes.length === 0
-        ? html`<div class="blank-state">
-            ${icon('notes', 24)}
-            <h2>No notes with ${person}.</h2>
-          </div>`
-        : html`<div class="collection-grid">
-            ${notes.map((note) => collectionCard(note))}
-          </div>`
-    }
+    <section
+      class="collection-list"
+      id="list-pane"
+      aria-label="Notes with ${person}"
+    >
+      ${listPane()}
+    </section>
   </div>`;
 }
 
 function recipesView(): Html {
   return html`<div class="page">
     <header class="page-head">
-      <div class="eyebrow">Saved prompts</div>
       <h1>Recipes</h1>
-      <p class="lede">
-        The questions you ask every week, saved once. Invoke one with
-        <kbd>/</kbd> in the chat bar.
-      </p>
+      <p class="lede">Reuse prompts in chat by typing <kbd>/</kbd>.</p>
       <div class="page-actions">
         <button class="primary-btn" data-act="new-recipe">
           ${icon('plus', 14)} New recipe
-        </button>
-        <button class="ghost-btn" data-act="nav" data-view="notes">
-          Open a note
         </button>
       </div>
     </header>
@@ -3257,33 +3332,30 @@ function recipesView(): Html {
             <h3>${recipe.name}</h3>
             <p>${recipe.prompt}</p>
             <div class="card-foot">
-              <span
-                >${recipe.scope === 'single' ? 'Ask from a meeting' : 'Ask anywhere'}</span
-              >
+              ${
+                recipe.scope === 'single'
+                  ? html`<button
+                      class="text-btn"
+                      data-act="nav"
+                      data-view="notes"
+                    >
+                      Choose a note ${icon('arrowRight', 13)}
+                    </button>`
+                  : html`<button
+                      class="text-btn"
+                      data-act="run-recipe"
+                      data-id="${recipe.id}"
+                    >
+                      ${icon('play', 13)} Run recipe
+                    </button>`
+              }
               <div class="recipe-actions">
-                ${
-                  recipe.scope === 'single'
-                    ? html`<button
-                        class="tiny-btn"
-                        disabled
-                        title="Open a meeting to use this recipe"
-                      >
-                        ${icon('play', 12)}
-                      </button>`
-                    : html`<button
-                        class="tiny-btn"
-                        data-act="run-recipe"
-                        data-id="${recipe.id}"
-                        title="Use recipe"
-                      >
-                        ${icon('play', 12)}
-                      </button>`
-                }
                 <button
                   class="tiny-btn danger"
                   data-act="delete-recipe"
                   data-id="${recipe.id}"
                   title="Delete recipe"
+                  aria-label="Delete ${recipe.name}"
                 >
                   ${icon('trash', 12)}
                 </button>
@@ -3292,46 +3364,40 @@ function recipesView(): Html {
           </article>`,
       )}
     </div>
-    <div class="tip-card">
-      ${icon('recipe', 16)}
-      <p>
-        <strong>Make one from a good question.</strong> If you asked something
-        useful in chat, save it as a recipe with its scope and model so next
-        week is one keystroke.
-      </p>
-    </div>
+    ${
+      ui.db.recipes.length === 0
+        ? html`<div class="blank-state">
+            ${icon('recipe', 24)}
+            <h2>No recipes yet</h2>
+            <p>Save a prompt you want to use again.</p>
+          </div>`
+        : ''
+    }
   </div>`;
 }
 
 function trashView(): Html {
   const notes = ui.db.notes.filter((note) => note.deletedAt);
-  return html`<div class="page">
-    <header class="page-head">
-      <div class="eyebrow">Deleted notes</div>
-      <h1>Trash</h1>
-      <p class="lede">
-        ${notes.length === 0 ? 'Nothing here. Deleted notes rest here until you empty them.' : `${notes.length} ${notes.length === 1 ? 'note' : 'notes'} waiting. Restore them from the list, or remove them for good.`}
-      </p>
+  return html`<div class="page collection-page">
+    <header class="page-head page-head-actions">
+      <div>
+        <h1>Trash</h1>
+        <p class="lede">Restore deleted notes or remove them permanently.</p>
+      </div>
       ${
         notes.length > 0
-          ? html`<div class="page-actions">
-              <button class="danger-btn" data-act="empty-trash">
-                ${icon('trash', 14)} Empty trash
-              </button>
-            </div>`
+          ? html`<button
+              class="ghost-btn danger-outline"
+              data-act="empty-trash"
+            >
+              ${icon('trash', 15)} Empty trash
+            </button>`
           : ''
       }
     </header>
-    <div class="blank-state">
-      ${icon('trash', 26)}
-      <h2>
-        ${notes.length === 0 ? 'Trash is empty.' : 'Nothing is gone for good yet.'}
-      </h2>
-      <p>
-        Notes in trash are excluded from search, chat, sharing and the People
-        directory.
-      </p>
-    </div>
+    <section class="collection-list" id="list-pane" aria-label="Deleted notes">
+      ${listPane()}
+    </section>
   </div>`;
 }
 
@@ -3485,20 +3551,63 @@ async function downloadDiarizationModel(): Promise<void> {
 }
 
 function settingsView(): Html {
+  const sections = [
+    ['appearance', 'Appearance'],
+    ['intelligence', 'Intelligence'],
+    ['capture', 'Capture'],
+    ['calendar', 'Calendar'],
+    ['templates', 'Templates'],
+    ['data', 'Data'],
+    ['about', 'About'],
+  ];
   return html`<div class="page settings-page">
     <header class="page-head">
-      <div class="eyebrow">Personal</div>
       <h1>Settings</h1>
       <p class="lede">
-        No account, no plans. Lilt stays useful without a model key, but a key
-        adds real note enhancement and chat.
+        Manage appearance, recording, models, calendar, and local data.
       </p>
     </header>
 
+    <div class="settings-layout">
+      <nav class="settings-nav" aria-label="Settings sections">
+        ${sections.map(([id, label]) => html`<button data-act="settings-section" data-section="${id}">${label}${icon('arrowRight', 12)}</button>`)}
+      </nav>
+      <div>${settingsContent()}</div>
+    </div>
+  </div>`;
+}
+
+function settingsContent(): Html {
+  const appearance = ui.db.settings.appearance;
+  return html`<section class="settings-section">
+      <div class="settings-head">
+        <h2 id="settings-appearance" tabindex="-1">Appearance</h2>
+      </div>
+      <label class="field">
+        <span>Color theme</span>
+        <select data-change="appearance">
+          <option
+            value="system"
+            ${appearance === 'system' ? raw('selected') : ''}
+          >
+            System
+          </option>
+          <option
+            value="light"
+            ${appearance === 'light' ? raw('selected') : ''}
+          >
+            Light
+          </option>
+          <option value="dark" ${appearance === 'dark' ? raw('selected') : ''}>
+            Dark
+          </option>
+        </select>
+      </label>
+    </section>
     <form data-form="settings" class="settings-form">
       <section class="settings-section">
         <div class="settings-head">
-          <h2>Intelligence</h2>
+          <h2 id="settings-intelligence" tabindex="-1">Intelligence</h2>
           <span class="status-pill ${ui.ai.configured ? 'good' : ''}">
             <span class="status-dot"></span>
             ${ui.ai.configured ? 'Model connected' : 'Offline extract'}
@@ -3670,7 +3779,9 @@ function settingsView(): Html {
       </section>
 
       <section class="settings-section">
-        <div class="settings-head"><h2>Capture</h2></div>
+        <div class="settings-head">
+          <h2 id="settings-capture" tabindex="-1">Capture</h2>
+        </div>
         <div class="field-grid two">
           <label class="field">
             <span>Default transcript language</span>
@@ -3829,7 +3940,7 @@ function settingsView(): Html {
 
     <section class="settings-section">
       <div class="settings-head">
-        <h2>Calendar</h2>
+        <h2 id="settings-calendar" tabindex="-1">Calendar</h2>
         <span class="status-pill ${ui.calendar.status.connected ? 'good' : ''}">
           <span class="status-dot"></span>
           ${ui.calendar.status.connected ? (ui.calendar.status.provider === 'microsoft' ? 'Outlook' : 'Google Calendar') : 'Not connected'}
@@ -3919,7 +4030,7 @@ function settingsView(): Html {
 
     <section class="settings-section">
       <div class="settings-head">
-        <h2>Templates</h2>
+        <h2 id="settings-templates" tabindex="-1">Templates</h2>
         <button type="button" class="ghost-btn small" data-act="new-template">
           ${icon('plus', 13)} New template
         </button>
@@ -3959,12 +4070,11 @@ function settingsView(): Html {
 
     <section class="settings-section">
       <div class="settings-head">
-        <h2>Data</h2>
-        <span class="small-note">Local-first</span>
+        <h2 id="settings-data" tabindex="-1">Data</h2>
       </div>
       <p class="settings-desc">
-        Notes, transcripts and settings live in a single local file in the app's
-        user data folder. Audio is never part of it.
+        Notes, transcripts, and settings are stored on this device. Audio
+        retention is configured under Capture.
       </p>
       <div class="data-actions">
         <button class="ghost-btn" data-act="export-all">
@@ -3980,7 +4090,9 @@ function settingsView(): Html {
     </section>
 
     <section class="settings-section about">
-      <div class="settings-head"><h2>About this build</h2></div>
+      <div class="settings-head">
+        <h2 id="settings-about" tabindex="-1">About Lilt</h2>
+      </div>
       <p class="settings-desc">
         A bot-free meeting notepad that belongs to you: no account, no plans, no
         feature gates. Capture is manual. “Me” is your microphone, “Them” is
@@ -3990,8 +4102,7 @@ function settingsView(): Html {
         <span>${brandMark(18)} Lilt 1.0 · personal build</span>
         <span>${ui.db.notes.length} notes · ${ui.db.workspace.name}</span>
       </div>
-    </section>
-  </div>`;
+    </section>`;
 }
 
 // ---------------------------------------------------------------------------
@@ -4519,22 +4630,16 @@ ${space?.description ?? ''}</textarea>
         </header>
         <form data-form="share">
           <p class="modal-lede">
-            This link only opens on this computer. It shows the enhanced
-            summary; raw notes and the transcript stay out. There is no sign-in,
-            so treat it as a convenience link, not private access.
+            The link opens on this computer and shows the summary and attendees.
+            Raw notes and the transcript stay private.
           </p>
-          <div class="inline-warning">
-            ${icon('globe', 13)}<span
-              >Links use 127.0.0.1 and will not open on another computer.</span
-            >
-          </div>
           <div class="share-options">
             ${[
-              ['off', 'Off', 'No link is served.'],
+              ['off', 'Off', 'Disable the preview link.'],
               [
                 'anyone',
                 'Preview on this device',
-                'Anyone using this computer with the link can read the summary.',
+                'Anyone with the link on this computer can open the preview.',
               ],
             ].map(
               ([value, label, description]) =>
@@ -4558,9 +4663,8 @@ ${space?.description ?? ''}</textarea>
             !note.enhanced
               ? html`<div class="inline-warning">
                   ${icon('zap', 13)}<span
-                    >There is no enhanced summary yet. The viewer will say the
-                    summary is still being written. Enhance the note first for a
-                    useful link.</span
+                    >The preview will show that the meeting has no summary
+                    yet.</span
                   >
                 </div>`
               : ''
@@ -4673,6 +4777,7 @@ function openNote(id: string): void {
     return;
   }
   ui.selected.clear();
+  ui.noteCollection = collectionForView();
   ui.view = { name: 'note', noteId: id };
   ui.noteTab = note.enhanced ? 'enhanced' : 'raw';
   ui.transcriptQuery = '';
@@ -4808,12 +4913,43 @@ function onClick(event: MouseEvent): void {
   switch (act) {
     case 'nav':
       navigate(actionEl.dataset.view ?? 'home', actionEl.dataset.id);
+      if (actionEl.dataset.section) {
+        document
+          .getElementById(`settings-${actionEl.dataset.section}`)
+          ?.scrollIntoView();
+      }
+      return;
+    case 'back-to-notes': {
+      const previousNote = currentNote();
+      ui.view = ui.noteCollection;
+      ui.selected.clear();
+      renderAll();
+      if (previousNote && event.detail === 0) {
+        document
+          .querySelector<HTMLButtonElement>(
+            `.row-open[data-id="${CSS.escape(previousNote.id)}"]`,
+          )
+          ?.focus();
+      }
+      return;
+    }
+    case 'settings-section':
+      if (actionEl.dataset.section) {
+        const heading = document.getElementById(
+          `settings-${actionEl.dataset.section}`,
+        );
+        heading?.focus();
+        heading?.scrollIntoView({ block: 'start' });
+      }
       return;
     case 'toggle-rail':
       toggleRail();
       return;
     case 'open-note':
-      if (id) openNote(id);
+      if (id) {
+        openNote(id);
+        if (event.detail === 0) document.getElementById('main')?.focus();
+      }
       return;
     case 'start-event': {
       const event = eventByKey(actionEl.dataset.key);
@@ -4868,9 +5004,7 @@ function onClick(event: MouseEvent): void {
       startChat();
       return;
     case 'close-chat':
-      ui.chatOpen = false;
-      ui.chatMenu = false;
-      renderAll();
+      closeChat();
       return;
     case 'new-thread':
       newThread();
@@ -4991,6 +5125,10 @@ function onClick(event: MouseEvent): void {
       if (tab === 'enhanced' || tab === 'raw' || tab === 'transcript') {
         ui.noteTab = tab;
         renderMain();
+        if (event.detail === 0)
+          document
+            .querySelector<HTMLButtonElement>(`.tab[data-tab="${tab}"]`)
+            ?.focus();
         if (tab === 'transcript' && currentNote()?.status === 'recording') {
           scrollTranscript();
         }
@@ -5284,6 +5422,16 @@ function onChange(event: Event): void {
     return;
   const kind = target.dataset.change;
 
+  if (kind === 'appearance' && target instanceof HTMLSelectElement) {
+    const value = target.value;
+    if (value === 'system' || value === 'light' || value === 'dark') {
+      ui.db.settings.appearance = value;
+      document.documentElement.dataset.appearance = value;
+      persist(true);
+    }
+    return;
+  }
+
   const settingsForm = target.closest<HTMLFormElement>(
     'form[data-form="settings"]',
   );
@@ -5419,8 +5567,7 @@ function onKeyDown(event: KeyboardEvent): void {
       target instanceof HTMLElement &&
       target.closest('.chatpane')
     ) {
-      ui.chatOpen = false;
-      renderAll();
+      closeChat();
       return;
     }
     if (ui.selected.size > 0) {
@@ -5442,7 +5589,6 @@ function onKeyDown(event: KeyboardEvent): void {
       ui.view = { name: 'notes' };
       renderAll();
     }
-    if (ui.railClosed) toggleRail();
     const field = document.querySelector<HTMLInputElement>(
       '[data-input="search"]',
     );
@@ -5639,6 +5785,7 @@ async function boot(): Promise<void> {
       window.api.aiConfig(),
       window.api.calendarStatus().catch(() => CALENDAR_OFF),
     ]);
+    db.settings = mergeSettings(db.settings);
     for (const note of db.notes) {
       if (note.status === 'recording' || note.status === 'paused') {
         note.status = 'ended';
@@ -5650,6 +5797,7 @@ async function boot(): Promise<void> {
       ai,
       calendar: { status: calendarStatus, events: [], syncing: false },
       view: { name: 'home' },
+      noteCollection: { name: 'notes' },
       query: '',
       selected: new Set(),
       lastCheckedId: null,

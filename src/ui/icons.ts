@@ -17,7 +17,7 @@ const BODIES: Record<string, string> = {
   mic: '<rect x="9" y="3" width="6" height="11" rx="3"/><path d="M5 11a7 7 0 0 0 14 0M12 18v3"/>',
   stop: '<rect x="7" y="7" width="10" height="10" rx="2"/>',
   pause: '<path d="M9 6v12M15 6v12"/>',
-  play: '<path d="M8 5l11 7-11 7z"/>',
+  play: '<path d="M10 5l11 7-11 7z"/>',
   share:
     '<circle cx="6" cy="12" r="2.5"/><circle cx="18" cy="6" r="2.5"/><circle cx="18" cy="18" r="2.5"/><path d="m8.3 10.8 7.4-3.6M8.3 13.2l7.4 3.6"/>',
   trash: '<path d="M4 7h16M9 7V4h6v3M6 7l1 14h10l1-14M10 11v6M14 11v6"/>',
@@ -31,6 +31,7 @@ const BODIES: Record<string, string> = {
   circle: '<circle cx="12" cy="12" r="7"/>',
   clock: '<circle cx="12" cy="12" r="8"/><path d="M12 7v5l3 2"/>',
   arrowRight: '<path d="M5 12h14M13 6l6 6-6 6"/>',
+  arrowLeft: '<path d="M19 12H5m6-6-6 6 6 6"/>',
   download: '<path d="M12 4v11M7 11l5 5 5-5M5 20h14"/>',
   external:
     '<path d="M14 4h6v6M20 4l-9 9"/><path d="M19 14v5a1 1 0 0 1-1 1H5a1 1 0 0 1-1-1V6a1 1 0 0 1 1-1h5"/>',
@@ -49,8 +50,10 @@ const BODIES: Record<string, string> = {
 export type IconName = keyof typeof BODIES;
 
 export function icon(name: IconName, size = 16): Html {
+  const directional =
+    name === 'arrowLeft' || name === 'arrowRight' || name === 'send';
   return new Html(
-    `<svg class="icon" width="${size}" height="${size}" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">${BODIES[name]}</svg>`,
+    `<svg class="icon${directional ? ' icon-directional' : ''}" width="${size}" height="${size}" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">${BODIES[name]}</svg>`,
   );
 }
 

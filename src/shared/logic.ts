@@ -70,6 +70,7 @@ const STOPWORDS = new Set([
 
 /** Settings a fresh install, or an older store.json, is upgraded to. */
 export const DEFAULT_SETTINGS: Settings = {
+  appearance: 'system',
   notifications: true,
   includeSystemAudio: true,
   sttLanguage: 'en',
@@ -82,7 +83,15 @@ export const DEFAULT_SETTINGS: Settings = {
 
 /** Fill in settings added since this store was written. */
 export function mergeSettings(stored?: Partial<Settings> | null): Settings {
-  return { ...DEFAULT_SETTINGS, ...stored };
+  const appearance = stored?.appearance;
+  return {
+    ...DEFAULT_SETTINGS,
+    ...stored,
+    appearance:
+      appearance === 'light' || appearance === 'dark'
+        ? appearance
+        : DEFAULT_SETTINGS.appearance,
+  };
 }
 
 export function visibleNotes(store: Store): Note[] {
