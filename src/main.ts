@@ -369,9 +369,7 @@ async function complete(req: AiCompleteRequest): Promise<{ text: string }> {
   const config = readAiConfig();
   const key = await apiKey();
   if (!key && !isLocalEndpoint(config.baseUrl))
-    throw new Error(
-      'No API key configured. Add one in Settings → Intelligence.',
-    );
+    throw new Error('No API key configured. Add one in Settings → Models.');
   const model =
     req.model === 'auto'
       ? config.chatModel
@@ -419,9 +417,7 @@ async function transcribe(req: TranscribeRequest): Promise<{ text: string }> {
     );
   if (config.sttSource === 'local-server') {
     if (!config.sttServerUrl.trim())
-      throw new Error(
-        'Set the local Whisper server URL in Settings → Intelligence.',
-      );
+      throw new Error('Set the local Whisper server URL in Settings → Models.');
     if (!req.pcm || req.pcm.length === 0)
       throw new Error('Local transcription needs audio samples.');
     return {
@@ -438,7 +434,7 @@ async function transcribe(req: TranscribeRequest): Promise<{ text: string }> {
   if (local) {
     if (!localModelReady(dataDir(), local))
       throw new Error(
-        'The local Whisper model is not downloaded. Open Settings → Intelligence and download it.',
+        'The local Whisper model is not downloaded. Open Settings → Models and download it.',
       );
     if (!req.pcm || req.pcm.length === 0)
       throw new Error('Local transcription needs audio samples.');
@@ -454,9 +450,7 @@ async function transcribe(req: TranscribeRequest): Promise<{ text: string }> {
   }
   const key = await apiKey();
   if (!key && !isLocalEndpoint(config.baseUrl))
-    throw new Error(
-      'No API key configured. Add one in Settings → Intelligence.',
-    );
+    throw new Error('No API key configured. Add one in Settings → Models.');
   if (!req.data || req.data.byteLength > 24 * 1024 * 1024) {
     throw new Error(
       req.data ? 'Audio chunk is too large' : 'No audio chunk was sent',
@@ -1289,7 +1283,7 @@ function createWindow(): void {
     height: 880,
     minWidth: 1060,
     minHeight: 680,
-    backgroundColor: nativeTheme.shouldUseDarkColors ? '#141522' : '#f1f3fa',
+    backgroundColor: nativeTheme.shouldUseDarkColors ? '#1c201c' : '#f6f5ef',
     title: 'Lilt',
     autoHideMenuBar: true,
     webPreferences: {

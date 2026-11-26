@@ -47,7 +47,7 @@ npm test
 
 ### Adding a new AI provider (e.g., Groq)
 
-1. Go to **Settings → Intelligence**
+1. Go to **Settings → Models**
 2. Set **Base URL** to `https://api.groq.com/openai/v1`
 3. Enter your Groq API key
 4. Set **Chat model** to a Groq model name (e.g., `llama-3.3-70b-versatile`)
@@ -60,7 +60,7 @@ Common Groq model names:
 
 ### Local Speech-to-Text
 
-Download a local Whisper model in **Settings → Intelligence → Speech source**:
+Download a local Whisper model in **Settings → Models → Speech-to-text**:
 - `whisper-tiny` (~75MB) - Fastest, lowest quality
 - `whisper-small` (~2.5GB) - Balanced
 - `whisper-medium` (~5GB) - Higher quality
